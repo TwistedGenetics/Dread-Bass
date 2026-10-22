@@ -68,8 +68,8 @@ static Stats stats(const std::vector<float> &x, size_t from = 0, size_t to = 0) 
 
 // ---- settings ----
 struct Set {
-  int timbre = 300, drive = 25, mode = 0, chr = 20, sub = 60, subOct = 0, knock = 0, pluck = 0;
-  int egInt = 2, egTime = 120, retrig = 1, semi = 0, fine = 0;
+  int timbre = 650, drive = 25, mode = 0, chr = 60, sub = 55, subOct = 0, knock = 0, pluck = 0;
+  int egInt = 0, egTime = 300, retrig = 1, semi = 0, fine = 0;
 };
 template <class E> static void apply(E &e, const Set &s) {
   const int v[P::kNumParams] = {s.timbre, s.drive, s.mode, s.chr, s.sub, s.subOct, s.knock,
@@ -167,7 +167,7 @@ int main() {
 
   printf("== tuning (EG INT 0, sine) ==\n");
   for (float note : {28.f, 36.f, 45.f, 57.f}) {
-    Set s; s.mode = P::kDread; s.timbre = 0; s.drive = 0; s.chr = 0; s.sub = 0; s.egInt = 0;
+    Set s; s.mode = P::kGrowl; s.timbre = 0; s.drive = 0; s.chr = 0; s.sub = 0; s.egInt = 0;
     const auto x = render1(s, note, sec);
     const float want = 440.f * std::pow(2.f, (note - 69.f) / 12.f);
     const float got = pitchHz(x, 4800);
@@ -175,7 +175,7 @@ int main() {
     result(std::fabs(cents) < 3.f, "note %2.0f  want %.2f Hz got %.2f Hz (%+.1f cents)", note, want, got, cents);
   }
   {
-    Set s; s.timbre = 0; s.drive = 0; s.chr = 0; s.sub = 0; s.egInt = 0; s.semi = -12; s.fine = 50;
+    Set s; s.mode = P::kGrowl; s.timbre = 0; s.drive = 0; s.chr = 0; s.sub = 0; s.egInt = 0; s.semi = -12; s.fine = 50;
     const auto x = render1(s, 48.f, sec);
     const float want = 440.f * std::pow(2.f, (36.5f - 69.f) / 12.f);
     const float got = pitchHz(x, 4800);
@@ -201,7 +201,7 @@ int main() {
     // with the main osc turned into a near-square by full drive, the sub's
     // contribution must still be a sine: the difference between SUB 100 and
     // SUB 0 renders should have almost no energy above a few harmonics
-    Set a; a.mode = P::kDread; a.timbre = 1023; a.drive = 100; a.chr = 100; a.sub = 0; a.egInt = 0;
+    Set a; a.mode = P::kGrowl; a.timbre = 1023; a.drive = 100; a.chr = 100; a.sub = 0; a.egInt = 0;
     Set b = a; b.sub = 100;
     const auto xa = render1(a, 36.f, sec), xb = render1(b, 36.f, sec);
     std::vector<float> d(xa.size());
@@ -213,7 +213,7 @@ int main() {
   printf("== envelopes ==\n");
   {
     // EG INT +24, 40 ms: pitch starts high and settles
-    Set s; s.mode = P::kDread; s.timbre = 0; s.drive = 0; s.sub = 0; s.egInt = 24; s.egTime = 40;
+    Set s; s.mode = P::kGrowl; s.timbre = 0; s.drive = 0; s.sub = 0; s.egInt = 24; s.egTime = 40;
     const auto x = render1(s, 36.f, sec);
     std::vector<float> head(x.begin(), x.begin() + 960), tail(x.begin() + 24000, x.end());
     const float f0 = pitchHz(head, 0), f1 = pitchHz(tail, 0);
@@ -250,7 +250,9 @@ int main() {
     const float around = maxStep(x, at - 2, at + 200);
     // the restart rises to full level, so allow bigger steps than the decayed tail,
     // but nothing like a jump to full scale in one sample
-    const float full = maxStep(x, 100, 4800);
+    // reference: the same new note played fresh (steep waveforms are not clicks)
+    const auto y = render1(s, 39.f, 9600);
+    const float full = maxStep(y, 1, 4800);
     result(around < full * 1.2f + 0.02f, "%-6s retrig legato: max step %.3f (decayed %.3f, fresh %.3f)",
            kModeNames[m], around, base, full);
   }
@@ -330,7 +332,11 @@ int main() {
       const Stats st = stats(x);
       ++total;
       worst = std::fmax(worst, st.peak);
-      if (st.bad || st.peak > 1.f || std::fabs(st.dc) > 0.2f) ++bad;
+      if (st.bad || st.peak > 1.f || std::fabs(st.dc) > 0.2f) {
+        ++bad;
+        printf("  bad: mode %d timbre %d drive %d char %d sub %d knock %d pluck %d egint %d egtime %d note %.0f  nan %d dc %.3f\n",
+               s.mode, s.timbre, s.drive, s.chr, s.sub, s.knock, s.pluck, s.egInt, s.egTime, note, (int)st.bad, st.dc);
+      }
     }
     result(bad == 0, "%d random settings / notes / block sizes: %d bad, worst peak %.3f", total, bad, worst);
   }
@@ -386,30 +392,61 @@ int main() {
 
   printf("== demos -> test/out/*.wav ==\n");
   {
-    struct Demo { const char *name; Set s; std::vector<float> notes; int stepMs; bool legato; };
+    // Each demo is two bars at 170 BPM played the way the synth would: notes
+    // are gated by an amp envelope (1 ms attack, 25 ms release), a note that
+    // starts after the last one has died is a fresh voice, an overlapping
+    // one is legato. Steps are 16ths.
+    struct Step { int at, len; float note; };
+    struct Demo { const char *name; Set s; std::vector<Step> steps; };
     std::vector<Demo> demos;
     // Starter settings from the README
-    { Set s; s.mode = P::kDread; s.timbre = 420; s.drive = 35; s.chr = 30; s.sub = 70; s.egInt = 3; s.egTime = 180;
-      s.retrig = 0;
-      demos.push_back({"dread_roller", s, {31, 31, 34, 31, 29, 31, 26, 29}, 250, true}); }
-    { Set s; s.mode = P::kDonk; s.timbre = 250; s.drive = 30; s.chr = 65; s.sub = 40; s.knock = 70; s.pluck = 72;
-      s.egInt = 14; s.egTime = 45;
-      demos.push_back({"donk_stab", s, {36, 36, 48, 36, 39, 36, 43, 41}, 188, false}); }
+    { Set s; s.mode = P::kDread; s.timbre = 700; s.drive = 30; s.chr = 70; s.sub = 50; s.pluck = 90; s.egInt = 0; s.egTime = 450;
+      demos.push_back({"dred_bass", s, {{0, 6, 31}, {6, 6, 31}, {12, 4, 29}, {16, 6, 34}, {22, 6, 31}, {28, 4, 26}}}); }
+    { Set s; s.mode = P::kDread; s.timbre = 480; s.drive = 15; s.chr = 45; s.sub = 75; s.pluck = 0; s.egInt = 0; s.egTime = 220;
+      demos.push_back({"dread_roller", s, {{0, 3, 31}, {3, 3, 31}, {6, 2, 34}, {8, 4, 31}, {12, 4, 29},
+                                           {16, 3, 31}, {19, 3, 31}, {22, 2, 26}, {24, 4, 29}, {28, 4, 31}}}); }
+    { Set s; s.mode = P::kDonk; s.timbre = 600; s.drive = 20; s.chr = 45; s.sub = 30; s.pluck = 75; s.egInt = 12; s.egTime = 60;
+      demos.push_back({"donk", s, {{0, 1, 36}, {3, 1, 36}, {6, 1, 48}, {8, 1, 36}, {10, 1, 39}, {11, 1, 36}, {14, 1, 43},
+                                   {16, 1, 36}, {19, 1, 36}, {22, 1, 48}, {24, 1, 41}, {26, 1, 39}, {28, 1, 36}, {30, 1, 34}}}); }
     { Set s; s.mode = P::kGrowl; s.timbre = 700; s.drive = 45; s.chr = 55; s.sub = 55; s.egInt = 5; s.egTime = 250;
-      demos.push_back({"snarl_fm", s, {29, 29, 32, 29, 27, 29, 24, 27}, 250, true}); }
-    { Set s; s.mode = P::kDread; s.timbre = 900; s.drive = 80; s.chr = 70; s.sub = 60; s.knock = 25; s.egInt = 7;
-      s.egTime = 90; s.pluck = 25;
-      demos.push_back({"techstep_growl", s, {33, 33, 36, 33, 31, 33, 28, 31}, 188, false}); }
+      demos.push_back({"snarl_fm", s, {{0, 4, 29}, {4, 4, 29}, {8, 2, 32}, {10, 6, 29}, {16, 4, 27}, {20, 4, 29}, {24, 8, 24}}}); }
     { Set s; s.mode = P::kHoover; s.timbre = 800; s.drive = 20; s.chr = 60; s.sub = 35; s.egInt = 12; s.egTime = 300;
-      demos.push_back({"hoover_dive", s, {45, 45, 48, 43}, 500, false}); }
+      demos.push_back({"hoover_dive", s, {{0, 8, 45}, {8, 8, 48}, {16, 8, 43}, {24, 8, 41}}}); }
+
+    const int step = kRate * 60 / 170 / 4;
     for (auto &d : demos) {
-      std::vector<Ev> evs;
-      const int step = d.stepMs * kRate / 1000;
-      for (size_t i = 1; i < d.notes.size(); ++i) evs.push_back({(int)i * step, d.notes[i], !d.legato});
-      // a fresh note on a mono voice would come after the amp EG closed; here
-      // the voice is reused straight away, so show it as a legato steal
-      for (auto &e : evs) e.fresh = false;
-      const auto x = render1(d.s, d.notes[0], step * (int)d.notes.size(), evs);
+      DreadBass1 e;
+      e.init();
+      apply(e, d.s);
+      const int total = step * 32 + kRate / 4;
+      std::vector<float> x;
+      x.reserve(total);
+      float buf[kMaxBlock];
+      float amp = 0.f, gate = 0.f;
+      int gateEnd = -1;
+      size_t k = 0;
+      const float aUp = 1.f - std::exp(-1.f / (0.001f * kRate)), aDn = 1.f - std::exp(-1.f / (0.025f * kRate));
+      for (int pos = 0; pos < total;) {
+        if (k < d.steps.size() && d.steps[k].at * step <= pos) {
+          const bool sounding = amp > 1e-4f;
+          const bool held = pos < gateEnd;
+          e.setNote(0, d.steps[k].note);
+          e.noteOn(0, !sounding, held);
+          gate = 1.f;
+          gateEnd = (d.steps[k].at + d.steps[k].len) * step - step / 8;  // slight gap, unless tied
+          ++k;
+        }
+        int len = std::min((int)kMaxBlock, total - pos);
+        if (k < d.steps.size()) len = std::min(len, d.steps[k].at * step - pos);
+        if (pos < gateEnd) len = std::min(len, gateEnd - pos);
+        if (pos >= gateEnd) gate = 0.f;
+        e.render(buf, len);
+        for (int i = 0; i < len; ++i) {
+          amp += (gate > amp ? aUp : aDn) * (gate - amp);
+          x.push_back(buf[i] * amp);
+        }
+        pos += len;
+      }
       const Stats st = stats(x);
       writeWav(std::string("test/out/") + d.name + ".wav", x);
       result(!st.bad && st.peak <= 1.f, "%-16s peak %.3f rms %.3f", d.name, st.peak, st.rms);

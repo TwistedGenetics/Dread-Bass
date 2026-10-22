@@ -33,20 +33,20 @@ const __unit_header unit_header_t unit_header = {
         // Order must match dread::Params in core/dreadbass.h
 
         // Page 1
-        {0, 1023, 0, 300, k_unit_param_type_none, 0, 0, 0, {"Timbre"}},
+        {0, 1023, 0, 650, k_unit_param_type_none, 0, 0, 0, {"Timbre"}},
         {0, 100, 0, 25, k_unit_param_type_percent, 0, 0, 0, {"Drive"}},
         {0, 3, 0, 0, k_unit_param_type_strings, 0, 0, 0, {"Mode"}},
 
         // Page 2
-        {0, 100, 0, 20, k_unit_param_type_percent, 0, 0, 0, {"Charactr"}},
-        {0, 100, 0, 60, k_unit_param_type_percent, 0, 0, 0, {"Sub"}},
+        {0, 100, 0, 60, k_unit_param_type_percent, 0, 0, 0, {"Charactr"}},
+        {0, 100, 0, 55, k_unit_param_type_percent, 0, 0, 0, {"Sub"}},
         {0, 1, 0, 0, k_unit_param_type_strings, 0, 0, 0, {"Sub Oct"}},
         {0, 100, 0, 0, k_unit_param_type_percent, 0, 0, 0, {"Knock"}},
         {0, 100, 0, 0, k_unit_param_type_percent, 0, 0, 0, {"Pluck"}},
 
         // Page 3
-        {-24, 48, 0, 2, k_unit_param_type_semi, 0, 0, 0, {"EG Int"}},
-        {1, 1000, 1, 120, k_unit_param_type_msec, 0, 0, 0, {"EG Time"}},
+        {-24, 48, 0, 0, k_unit_param_type_semi, 0, 0, 0, {"EG Int"}},
+        {1, 1000, 1, 300, k_unit_param_type_msec, 0, 0, 0, {"EG Time"}},
         {0, 1, 0, 1, k_unit_param_type_onoff, 0, 0, 0, {"Retrig"}},
         {-24, 24, 0, 0, k_unit_param_type_semi, 0, 0, 0, {"Semi"}},
         {-50, 50, 0, 0, k_unit_param_type_cents, 0, 0, 0, {"Fine"}}}};
