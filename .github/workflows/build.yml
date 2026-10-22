@@ -1,0 +1,83 @@
+name: Build Dread Bass
+
+# Every push / PR builds the unit and runs the DSP tests.
+# Releases: when the .version in microkorg2/header.c is a version that has no
+# Release yet (e.g. 0x00010000U = v1.0.0) and is pushed to main, Actions tags
+# it and publishes a new Release with the unit files. Pushing a v* tag also
+# works. Pushes that keep the same version refresh that Release's files.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache toolchain and logue SDK
+        uses: actions/cache@v4
+        with:
+          path: .deps
+          key: deps-${{ runner.os }}-${{ hashFiles('build.sh') }}
+
+      # Korg's gnueabihf toolchain; strict mode fails instead of skipping
+      - name: Build units
+        run: ./build.sh
+        env:
+          DREAD_STRICT: "1"
+
+      - name: Read unit version from header.c
+        id: ver
+        run: |
+          hex=$(grep -oE '\.version = 0x[0-9A-Fa-f]+' microkorg2/header.c | grep -oE '0x[0-9A-Fa-f]+')
+          v=$(( hex ))
+          echo "tag=v$(( (v >> 16) & 0xFF )).$(( (v >> 8) & 0xFF )).$(( v & 0xFF ))" >> "$GITHUB_OUTPUT"
+
+      - name: Check the tag matches the unit version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          echo "tag ${GITHUB_REF_NAME}, header.c says ${{ steps.ver.outputs.tag }}"
+          [ "$GITHUB_REF_NAME" = "${{ steps.ver.outputs.tag }}" ]
+
+      - name: Run DSP tests
+        run: ./test/run.sh
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: DreadBass-units
+          path: |
+            dist/*.mk2unit
+            test/out/*.wav
+
+      - name: Publish release
+        if: >-
+          startsWith(github.ref, 'refs/tags/v') ||
+          (github.ref == 'refs/heads/main' && github.event_name != 'pull_request')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || steps.ver.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: Dread Bass ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || steps.ver.outputs.tag }}
+          make_latest: true
+          files: |
+            dist/DreadBass.mk2unit
+            dist/DreadMtr.mk2unit
+            test/out/*.wav
+          body: |
+            Dread Bass — jungle / DnB character-bass oscillator (DREAD, DONK, GROWL, HOOVER, with knock, pluck, a clean sine sub and a pitch-bending shape EG) for the Korg microKORG 2 (firmware 2.0.0 or later).
+
+            Download `DreadBass.mk2unit` and load it as a user oscillator (see the README for the steps).
+
+            `DreadMtr.mk2unit` is optional: the same oscillator with this unit's CPU load shown next to MODE (e.g. `DONK 21%`). Load it alongside Dread Bass if you hear crackles and want to see how close to the limit it is.
+
+            The `.wav` files are the README's starter settings rendered by the desktop tests.
+
+            Controls and starter settings: see the [README](https://github.com/${{ github.repository }}#readme).

@@ -1,0 +1,11 @@
+# toolchain and SDK fetched by build.sh
+.deps/
+# build output (downloads come from GitHub Releases)
+*/build/
+*/.dep/
+tools/*/build/
+tools/*/.dep/
+dist/
+# desktop test artefacts
+test/render
+test/out/

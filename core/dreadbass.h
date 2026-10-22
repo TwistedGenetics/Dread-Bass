@@ -1,0 +1,658 @@
+#pragma once
+/*
+ * Dread Bass - jungle / DnB character-bass oscillator (DSP core)
+ *
+ * Sibling of Rollers (clean sub + Reese). Dread Bass covers the dirtier,
+ * more percussive end: dread, donk, growl and hoover.
+ *
+ * One engine, two builds:
+ *   DreadBass1 = Engine<float>  one voice (desktop tests, future NTS-1 port)
+ *   DreadBass4 = Engine<v4f>    four voices, one per NEON lane (microKORG 2)
+ * Both run exactly the same code.
+ *
+ * Per voice:
+ *
+ *   MODE   DREAD  sine pushed through a soft clipper (TIMBRE: sine -> fat
+ *                 squarish); CHARACTER biases the drive stage for even-
+ *                 harmonic growl
+ *          DONK   band-limited pulse (TIMBRE: hollow square -> narrow) into a
+ *                 resonant band-pass at 3x the note (CHARACTER: knocky ring)
+ *          GROWL  2-op FM, 1:1 ratio, index follows the shape EG
+ *                 (TIMBRE: index, CHARACTER: modulator feedback)
+ *          HOOVER two detuned band-limited pulses with slow PWM
+ *                 (TIMBRE: PWM depth, CHARACTER: detune)
+ *   + KNOCK  short pitched sine blip on note-on
+ *   -> DRIVE (cubic soft clip at 2x rate, gain compensated) -> DC blocker
+ *   + SUB    pure sine, 1 or 2 octaves down, after the drive (never dirty)
+ *   x PLUCK  optional decay of the whole voice (0 = sustain)
+ *   -> output limiter (transparent below 0.8, soft knee to 1)
+ *
+ *   SHAPE EG: one exponential envelope per voice, restarted on note-on.
+ *   EG INT (semitones) bends the pitch with it (dread droop, donk drop,
+ *   hoover dive); in GROWL it also lifts the FM index for the snarl.
+ *
+ * CPU rules (learned on Dusty Pads / Rollers, the microKORG 2 runs up to 8
+ * voices of this):
+ *   - everything slow (pitch, envelopes' block factors, coefficients) is
+ *     worked out once per buffer per voice; the sample loops only step ramps
+ *   - the per-sample work runs in short passes that each fit in the 16 NEON
+ *     q registers (one big loop spills to the stack and crackles)
+ *   - no compares in the sample loops: max(0, x) is 0.5 * (x + |x|), clamps
+ *     use two abs; GCC 10 turns vector compares into scalar code on ARM
+ *   - pulses and saws are polyBLEP (stateless, safe under fast PWM), sines
+ *     are refined parabolas, no tables, no divides in the sample loop,
+ *     no libm, no memory allocation
+ *   - only the passes the current MODE needs run; KNOCK is skipped when off
+ */
+
+#include <stdint.h>
+#include <string.h>
+
+namespace dread {
+
+typedef float v4f __attribute__((vector_size(16)));
+typedef int v4i __attribute__((vector_size(16)));
+typedef unsigned int v4u __attribute__((vector_size(16)));
+
+#define DB_INLINE inline __attribute__((always_inline))
+
+constexpr float kSR = 48000.f;
+constexpr float kInvSR = 1.f / 48000.f;
+constexpr float kW0A4 = 440.f / 48000.f;  // MIDI 69, cycles per sample
+enum { kMaxBlock = 64 };
+
+// ---------------------------------------------------------------------------
+// Scalar helpers (control rate)
+// ---------------------------------------------------------------------------
+
+static inline float clampf(float x, float lo, float hi) { return x < lo ? lo : (x > hi ? hi : x); }
+static inline int clampi(int x, int lo, int hi) { return x < lo ? lo : (x > hi ? hi : x); }
+static inline float maxf(float a, float b) { return a > b ? a : b; }
+
+// 2^x, about 1e-6 relative error (same as Dusty Pads)
+static inline float exp2f_fast(float x) {
+  x = clampf(x, -60.f, 60.f);
+  const float fl = (float)(int32_t)(x < 0.f ? x - 1.f : x);
+  const float xi = (x == fl + 1.f) ? x : fl;
+  const float f = x - xi;
+  const float p = 1.f + f * (0.69314718f + f * (0.24022650f + f * (0.05550411f + f * (0.00961813f + f * 0.00133336f))));
+  union { float f; int32_t i; } u;
+  u.i = ((int32_t)xi + 127) << 23;
+  return p * u.f;
+}
+
+// tan(x) for 0 <= x <= 0.3
+static inline float tanSmall(float x) {
+  const float x2 = x * x;
+  return x * (1.f + x2 * (0.33333333f + x2 * (0.13333333f + x2 * 0.05396825f)));
+}
+
+// cubic soft clip, scalar version of sat() below
+static inline float satf(float x) {
+  const float c = clampf(x, -1.f, 1.f);
+  return c * (1.5f - 0.5f * c * c);
+}
+
+// ---------------------------------------------------------------------------
+// Lane helpers: the same names for float (1 lane) and v4f (4 lanes)
+// ---------------------------------------------------------------------------
+
+template <class V> struct LaneInfo;
+template <> struct LaneInfo<float> { enum { N = 1 }; };
+template <> struct LaneInfo<v4f> { enum { N = 4 }; };
+
+static DB_INLINE float lget(float x, int) { return x; }
+static DB_INLINE float lget(v4f x, int j) { return x[j]; }
+static DB_INLINE void lset(float &x, int, float v) { x = v; }
+static DB_INLINE void lset(v4f &x, int j, float v) { x[j] = v; }
+
+template <class V> static DB_INLINE V splat(float v);
+template <> DB_INLINE float splat<float>(float v) { return v; }
+template <> DB_INLINE v4f splat<v4f>(float v) { return (v4f){v, v, v, v}; }
+
+static DB_INLINE float absv(float x) { return __builtin_fabsf(x); }
+static DB_INLINE v4f absv(v4f x) { return (v4f)((v4u)x & 0x7FFFFFFFu); }
+
+static DB_INLINE float truncv(float x) { return (float)(int32_t)x; }
+static DB_INLINE v4f truncv(v4f x) {
+#if defined(__clang__) || (defined(__GNUC__) && __GNUC__ >= 9)
+  return __builtin_convertvector(__builtin_convertvector(x, v4i), v4f);
+#else
+  v4f r;
+  for (int j = 0; j < 4; ++j) r[j] = (float)(int32_t)x[j];
+  return r;
+#endif
+}
+
+// fractional part, t >= 0
+template <class V> static DB_INLINE V fracp(V t) { return t - truncv(t); }
+// max(0, x) without a compare
+template <class V> static DB_INLINE V relu(V x) { return 0.5f * (x + absv(x)); }
+// clamp to [-1, 1] with two abs
+template <class V> static DB_INLINE V clamp1(V x) { return 0.5f * (absv(x + 1.f) - absv(x - 1.f)); }
+// cubic soft clip: odd harmonics, flat at |x| >= 1
+template <class V> static DB_INLINE V sat(V x) {
+  const V c = clamp1(x);
+  return c * (1.5f - 0.5f * c * c);
+}
+
+// |m| with the sign of s
+static DB_INLINE float copysignv(float m, float s) { return __builtin_copysignf(m, s); }
+static DB_INLINE v4f copysignv(v4f m, v4f s) { return (v4f)(((v4u)m & 0x7FFFFFFFu) | ((v4u)s & 0x80000000u)); }
+
+// output limiter: transparent below 0.8, soft knee above, never exceeds 1
+// (same curve idea as Rollers, without compares)
+template <class V> static DB_INLINE V limit(V x) {
+  const V a = absv(x);
+  const V o = relu(a - 0.8f);
+  return copysignv(a - o + 0.2f * sat(3.3333333f * o), x);
+}
+
+// sin(2 pi t) for t in [0, 1): refined parabola (~0.1 % error)
+template <class V> static DB_INLINE V sin2pi(V t) {
+  const V y = 2.f * t - 1.f;
+  const V s0 = 4.f * y - 4.f * y * absv(y);
+  const V s = 0.225f * (s0 * absv(s0) - s0) + s0;
+  return -s;
+}
+
+// polyBLEP rising saw, t in [0, 1), idt = 1 / phase increment
+template <class V> static DB_INLINE V blepSaw(V t, V idt) {
+  const V a = relu(1.f - t * idt);          // just after the wrap
+  const V b = relu(1.f - (1.f - t) * idt);  // just before it
+  return 2.f * t - 1.f + a * a - b * b;
+}
+
+// ---------------------------------------------------------------------------
+// Parameters (same order as microkorg2/header.c)
+// ---------------------------------------------------------------------------
+
+struct Params {
+  enum Id {
+    kTimbre = 0,  // 0..1023  per-mode main timbre
+    kDrive,       // 0..100 %
+    kMode,        // DREAD, DONK, GROWL, HOOVER
+    kChar,        // 0..100 %  per-mode secondary control
+    kSub,         // 0..100 %  sine sub level
+    kSubOct,      // -1 OCT, -2 OCT
+    kKnock,       // 0..100 %  note-on blip
+    kPluck,       // 0..100 %  0 = sustain, up = shorter decay
+    kEgInt,       // -24..48 semitones, pitch bend of the shape EG
+    kEgTime,      // 1..1000 ms
+    kRetrig,      // off / on: restart the EGs on legato (stolen) notes
+    kSemi,        // -24..24
+    kFine,        // -50..50 cents
+    kNumParams
+  };
+  enum { kDread = 0, kDonk, kGrowl, kHoover, kNumModes };
+
+  static const char *modeName(int v) {
+    static const char *const n[] = {"DREAD", "DONK", "GROWL", "HOOVER"};
+    return n[clampi(v, 0, kNumModes - 1)];
+  }
+  static const char *subOctName(int v) { return v ? "-2 OCT" : "-1 OCT"; }
+};
+
+// Output level per mode so a MODE change stays at about the same loudness
+// (from the desktop tests' RMS measurements, see test/render.cc)
+struct ModeGain {
+  static constexpr float kDread = 0.84f;
+  static constexpr float kDonk = 0.78f;
+  static constexpr float kGrowl = 0.86f;
+  static constexpr float kHoover = 0.80f;
+};
+
+constexpr float kSubAmp = 0.9f;       // sub sine amplitude at SUB 100 %
+constexpr float kOutLevel = 0.55f;    // before the output limiter
+constexpr float kKnockTau = 0.006f;   // knock decay, seconds
+constexpr float kAttackCoef = 0.015f; // de-click when a legato note restarts PLUCK (~1.4 ms)
+constexpr float kDcCoef = 0.99935f;   // DC blocker pole, ~5 Hz
+
+// ---------------------------------------------------------------------------
+// The engine
+// ---------------------------------------------------------------------------
+
+template <class V>
+class Engine {
+ public:
+  enum { N = LaneInfo<V>::N };
+
+  void init() {
+    p_timbre_ = 300.f / 1023.f;
+    p_drive_ = 0.25f;
+    mode_ = Params::kDread;
+    p_char_ = 0.2f;
+    p_sub_ = 0.6f;
+    subOct_ = 0;
+    p_knock_ = 0.f;
+    p_pluck_ = 0.f;
+    egInt_ = 2.f;
+    egTimeMs_ = 120.f;
+    retrig_ = 1;
+    semi_ = 0.f;
+    fine_ = 0.f;
+    updateEgCoefs();
+    for (int j = 0; j < N; ++j) {
+      note_[j] = 36.f;
+      mod_timbre_[j] = mod_drive_[j] = mod_char_[j] = mod_sub_[j] = mod_pitch_[j] = 0.f;
+      lfo_[j] = 0.f;
+      jump_[j] = false;
+    }
+    resetState();
+  }
+
+  // Silence every lane and clear all audio state (unit_reset)
+  void resetState() {
+    const V z = splat<V>(0.f);
+    t_ = t2_ = ts_ = tk_ = z;
+    mprev_ = z;
+    s1_ = s2_ = z;
+    dcx_ = dcy_ = osx_ = osy_ = z;
+    penv_ = kenv_ = z;
+    dec_ = att_ = splat<V>(1.f);
+    first_ = true;
+  }
+
+  void setParam(int id, int32_t v) {
+    switch (id) {
+      case Params::kTimbre: p_timbre_ = clampi(v, 0, 1023) * (1.f / 1023.f); break;
+      case Params::kDrive: p_drive_ = clampi(v, 0, 100) * 0.01f; break;
+      case Params::kMode: mode_ = clampi(v, 0, Params::kNumModes - 1); break;
+      case Params::kChar: p_char_ = clampi(v, 0, 100) * 0.01f; break;
+      case Params::kSub: p_sub_ = clampi(v, 0, 100) * 0.01f; break;
+      case Params::kSubOct: subOct_ = clampi(v, 0, 1); break;
+      case Params::kKnock: p_knock_ = clampi(v, 0, 100) * 0.01f; break;
+      case Params::kPluck: p_pluck_ = clampi(v, 0, 100) * 0.01f; updateEgCoefs(); break;
+      case Params::kEgInt: egInt_ = (float)clampi(v, -24, 48); break;
+      case Params::kEgTime: egTimeMs_ = (float)clampi(v, 1, 1000); updateEgCoefs(); break;
+      case Params::kRetrig: retrig_ = clampi(v, 0, 1); break;
+      case Params::kSemi: semi_ = (float)clampi(v, -24, 24); break;
+      case Params::kFine: fine_ = clampi(v, -50, 50) * 0.01f; break;
+      default: break;
+    }
+  }
+
+  // Fractional MIDI note per lane
+  void setNote(int lane, float note) { note_[lane] = note; }
+
+  // Per-voice modulation: added to the normalised parameter; pitch in semitones
+  void setMod(int lane, float timbre, float drive, float chr, float sub, float pitchSemis) {
+    mod_timbre_[lane] = timbre;
+    mod_drive_[lane] = drive;
+    mod_char_[lane] = chr;
+    mod_sub_[lane] = sub;
+    mod_pitch_[lane] = pitchSemis;
+  }
+
+  // New note on one lane.
+  //   fresh  = the voice was silent: phases start at zero (every hit has the
+  //            same punch, the sub is phase-locked to the main osc) and
+  //            filters are cleared
+  //   legato = the previous note on this voice is still held: the envelopes
+  //            restart only when RETRIG is on
+  // A voice that is still sounding keeps its phases so it doesn't click.
+  void noteOn(int lane, bool fresh, bool legato = false) {
+    if (fresh) {
+      lset(t_, lane, 0.f);
+      lset(t2_, lane, 0.f);
+      lset(ts_, lane, 0.f);
+      lset(mprev_, lane, 0.f);
+      lset(s1_, lane, 0.f);
+      lset(s2_, lane, 0.f);
+      lset(dcx_, lane, 0.f);
+      lset(dcy_, lane, 0.f);
+      lset(osx_, lane, 0.f);
+      lset(osy_, lane, 0.f);
+      lset(att_, lane, 1.f);
+      lfo_[lane] = 0.f;  // hoover PWM starts the same on every hit
+    } else {
+      if (legato && !retrig_) {
+        jump_[lane] = true;  // new pitch, envelopes carry on
+        return;
+      }
+      // PLUCK restarts from where it is and rises to full in ~1.4 ms
+      lset(att_, lane, lget(dec_, lane) * lget(att_, lane));
+    }
+    lset(tk_, lane, 0.f);
+    lset(penv_, lane, 1.f);
+    lset(kenv_, lane, 1.f);
+    lset(dec_, lane, 1.f);
+    jump_[lane] = true;  // pitch jumps to the new note instead of ramping
+  }
+
+  // Render len (<= kMaxBlock) samples of all lanes into out
+  void render(V *out, int len) {
+    if (len <= 0) return;
+    if (len > kMaxBlock) len = kMaxBlock;
+    const float invLen = 1.f / (float)len;
+    const float fP = exp2f_fast(lP_ * (float)len);  // shape EG over this block
+    const float fK = exp2f_fast(lK_ * (float)len);  // knock EG over this block
+
+    // ---- control rate, per lane ----
+    V wEnd, idtEnd, tim, drv, chr, subl, idxEnd, wkEnd, pwEnd, a1, a2, a3, resMix, bodyMix;
+    float hRatio2 = 1.f, hRatio1 = 1.f;
+    if (mode_ == Params::kHoover) {
+      const float cents = 4.f + 26.f * clampf(p_char_, 0.f, 1.f);
+      hRatio1 = exp2f_fast(-cents * (1.f / 2400.f));
+      hRatio2 = exp2f_fast(cents * (1.f / 2400.f)) / hRatio1;  // osc 2 relative to osc 1
+    }
+    float anyKnock = 0.f;
+    const float hMax = maxf(hRatio2, 1.f);  // hoover osc 2 runs faster: its BLEP width
+    for (int j = 0; j < N; ++j) {
+      const float pe0 = lget(penv_, j);
+      const float pe = pe0 * fP;
+      lset(penv_, j, pe);
+      const float note = note_[j] + semi_ + fine_ + mod_pitch_[j];
+      const float w0 = kW0A4 * exp2f_fast((note - 69.f) * (1.f / 12.f));
+      float w = w0 * exp2f_fast(egInt_ * pe * (1.f / 12.f)) * hRatio1;
+      w = clampf(w, 1e-5f, 0.24f);
+      lset(wEnd, j, w);
+      lset(idtEnd, j, 1.f / (w * hMax));
+      if (jump_[j]) {
+        // new note: start this block at the top of the shape EG
+        const float ws = clampf(w0 * exp2f_fast(egInt_ * pe0 * (1.f / 12.f)) * hRatio1, 1e-5f, 0.24f);
+        const float tm0 = clampf(p_timbre_ + mod_timbre_[j], 0.f, 1.f);
+        lset(w_, j, ws);
+        lset(idt_, j, 1.f / (ws * hMax));
+        lset(idx_, j, 1.4f * tm0 * tm0 * (1.f + pe0));
+        lset(wk_, j, clampf(w0 * 6.f, 350.f * kInvSR, 2400.f * kInvSR) * (1.f + 1.5f * lget(kenv_, j)));
+        jump_[j] = false;
+      }
+
+      const float tm = clampf(p_timbre_ + mod_timbre_[j], 0.f, 1.f);
+      const float dv = clampf(p_drive_ + mod_drive_[j], 0.f, 1.f);
+      const float ch = clampf(p_char_ + mod_char_[j], 0.f, 1.f);
+      lset(tim, j, tm);
+      lset(drv, j, dv);
+      lset(chr, j, ch);
+      lset(subl, j, kSubAmp * clampf(p_sub_ + mod_sub_[j], 0.f, 1.f));
+
+      // GROWL: FM index in cycles, lifted by the shape EG
+      lset(idxEnd, j, 1.4f * tm * tm * (1.f + pe));
+
+      // KNOCK: a blip about 2.5 octaves over the note, sweeping down
+      const float ke = lget(kenv_, j) * fK;
+      anyKnock = maxf(anyKnock, lget(kenv_, j));
+      const float wk = clampf(w0 * 6.f, 350.f * kInvSR, 2400.f * kInvSR) * (1.f + 1.5f * ke);
+      lset(wkEnd, j, wk);
+
+      // pulse width: DONK = TIMBRE, HOOVER = slow PWM scaled by TIMBRE
+      float pw;
+      if (mode_ == Params::kHoover) {
+        lfo_[j] += 0.55f * (float)len * kInvSR;
+        lfo_[j] -= (float)(int32_t)lfo_[j];
+        pw = 0.5f - 0.42f * tm * (0.5f + 0.5f * sin2pi<float>(lfo_[j]));
+      } else {
+        pw = 0.5f - 0.42f * tm;
+      }
+      lset(pwEnd, j, pw);
+
+      // DONK resonator: band-pass at 3x the note, Q 1.5..13 with CHARACTER
+      const float fr = clampf(3.f * w, 40.f * kInvSR, 4000.f * kInvSR);
+      const float g = tanSmall(3.14159265f * fr);
+      const float k = 1.f / (1.5f + 11.5f * ch);
+      const float ia = 1.f / (1.f + g * (g + k));
+      lset(a1, j, ia);
+      lset(a2, j, g * ia);
+      lset(a3, j, g * g * ia);
+      lset(resMix, j, 1.7f * ch * k);  // k * band-pass = unity peak
+      lset(bodyMix, j, 1.f - 0.55f * ch);
+    }
+    const bool knockOn = p_knock_ > 0.f && anyKnock > 1e-4f;
+
+    if (first_) {  // nothing to ramp from yet
+      w_ = wEnd;
+      idt_ = idtEnd;
+      tim_ = tim;
+      idx_ = idxEnd;
+      wk_ = wkEnd;
+      pw_ = pwEnd;
+      drv_ = drv;
+      sub_ = subl;
+      first_ = false;
+    }
+
+    // ---- pass 1: phases ----
+    {
+      V t = t_, ts = ts_, w = w_;
+      const V winc = (wEnd - w) * invLen;
+      const float subMul = subOct_ ? (0.25f / hRatio1) : (0.5f / hRatio1);
+      for (int i = 0; i < len; ++i) {
+        w += winc;
+        t = fracp(t + w);
+        ts = fracp(ts + w * subMul);
+        T_[i] = t;
+        S_[i] = ts;
+        W_[i] = w;
+      }
+      t_ = t;
+      ts_ = ts;
+      w_ = wEnd;
+      if (mode_ == Params::kHoover) {
+        V t2 = t2_;
+        for (int i = 0; i < len; ++i) {
+          t2 = fracp(t2 + W_[i] * hRatio2);
+          T2_[i] = t2;
+        }
+        t2_ = t2;
+      }
+    }
+
+    // ---- pass 2: the mode's core waveform -> C_ ----
+    switch (mode_) {
+      case Params::kDread: {
+        V tm = tim_;
+        const V tinc = (tim - tm) * invLen;
+        for (int i = 0; i < len; ++i) {
+          tm += tinc;
+          const V s = sin2pi(T_[i]);
+          const V k = 1.f + 7.f * tm;
+          C_[i] = s + tm * (sat(k * s) - s);
+        }
+        break;
+      }
+      case Params::kDonk: {
+        V idt = idt_, pw = pw_;
+        const V iinc = (idtEnd - idt) * invLen;
+        const V pinc = (pwEnd - pw) * invLen;
+        for (int i = 0; i < len; ++i) {
+          idt += iinc;
+          pw += pinc;
+          const V t = T_[i];
+          C_[i] = blepSaw(t, idt) - blepSaw(fracp(t + pw), idt);
+        }
+        // resonator (TPT state-variable band-pass)
+        V s1 = s1_, s2 = s2_;
+        for (int i = 0; i < len; ++i) {
+          const V x = C_[i];
+          const V v3 = x - s2;
+          const V v1 = a1 * s1 + a2 * v3;
+          const V v2 = s2 + a2 * s1 + a3 * v3;
+          s1 = 2.f * v1 - s1;
+          s2 = 2.f * v2 - s2;
+          C_[i] = bodyMix * x + resMix * v1;
+        }
+        s1_ = s1;
+        s2_ = s2;
+        break;
+      }
+      case Params::kGrowl: {
+        V idx = idx_, mp = mprev_;
+        const V iinc = (idxEnd - idx) * invLen;
+        const V fb = 0.17f * chr;  // above ~0.2 cycles the edges get sharp enough to alias
+        for (int i = 0; i < len; ++i) {
+          idx += iinc;
+          const V t = T_[i];
+          const V m = sin2pi(fracp(t + fb * mp + 2.f));
+          mp = 0.5f * (m + mp);  // two-sample average keeps feedback tame
+          C_[i] = sin2pi(fracp(t + idx * m + 4.f));
+        }
+        mprev_ = mp;
+        break;
+      }
+      case Params::kHoover:
+      default: {
+        V idt = idt_, pw = pw_;
+        const V iinc = (idtEnd - idt) * invLen;
+        const V pinc = (pwEnd - pw) * invLen;
+        for (int i = 0; i < len; ++i) {
+          idt += iinc;
+          pw += pinc;
+          const V ta = T_[i], tb = T2_[i];
+          const V p1 = blepSaw(ta, idt) - blepSaw(fracp(ta + pw), idt);
+          const V p2 = blepSaw(tb, idt) - blepSaw(fracp(tb + pw), idt);
+          C_[i] = 0.62f * (p1 + p2);
+        }
+        break;
+      }
+    }
+    idt_ = idtEnd;
+    pw_ = pwEnd;
+    idx_ = idxEnd;
+    tim_ = tim;
+
+    // ---- pass 3: knock (skipped while silent) ----
+    if (knockOn) {
+      V tk = tk_, wk = wk_, ke = kenv_;
+      const V kinc = (wkEnd - wk) * invLen;
+      const float amt = 0.8f * p_knock_;
+      const float cK = cK_;
+      for (int i = 0; i < len; ++i) {
+        wk += kinc;
+        tk = fracp(tk + wk);
+        C_[i] += amt * ke * sin2pi(tk);
+        ke *= cK;
+      }
+      tk_ = tk;
+      kenv_ = ke;
+    } else {
+      kenv_ *= fK;
+    }
+    wk_ = wkEnd;
+
+    // ---- pass 4: drive (gain-compensated soft clip) + DC blocker ----
+    {
+      // DREAD: CHARACTER biases the clipper for even-harmonic growl
+      // (block-rate value: it doesn't need audio-rate modulation)
+      V b, sb, invn, gEnd, wetEnd;
+      for (int j = 0; j < N; ++j) {
+        const float bj = (mode_ == Params::kDread) ? 0.55f * lget(chr, j) : 0.f;
+        const float d = lget(drv, j);
+        const float g = 1.f + 11.f * d * d;
+        const float sbj = satf(bj);
+        const float n = maxf(satf(g + bj) - sbj, sbj - satf(bj - g));
+        lset(b, j, bj);
+        lset(sb, j, sbj);
+        lset(invn, j, 1.f / n);
+        lset(gEnd, j, g);
+        lset(wetEnd, j, clampf(3.f * d + 2.f * bj, 0.f, 1.f));
+      }
+      // ramp drive from the previous block's value
+      V gz, wz;
+      for (int j = 0; j < N; ++j) {
+        const float d = lget(drv_, j);
+        lset(gz, j, 1.f + 11.f * d * d);
+        const float bj = lget(b, j);
+        lset(wz, j, clampf(3.f * d + 2.f * bj, 0.f, 1.f));
+      }
+      const V ginc = (gEnd - gz) * invLen;
+      const V winc = (wetEnd - wz) * invLen;
+      // The clipper runs at 2x rate: the in-between sample is linearly
+      // interpolated, both are shaped, and a [1/4 1/2 1/4] filter brings it
+      // back down. Cheap, and keeps heavy drive clean higher up the keyboard.
+      V g = gz, wet = wz, xp = osx_, yp = osy_;
+      for (int i = 0; i < len; ++i) {
+        g += ginc;
+        wet += winc;
+        const V x = C_[i];
+        const V xm = 0.5f * (x + xp);
+        const V ym = xm + wet * ((sat(g * xm + b) - sb) * invn - xm);
+        const V yx = x + wet * ((sat(g * x + b) - sb) * invn - x);
+        C_[i] = 0.25f * (yp + yx) + 0.5f * ym;
+        xp = x;
+        yp = yx;
+      }
+      osx_ = xp;
+      osy_ = yp;
+      V x1 = dcx_, y1 = dcy_;
+      for (int i = 0; i < len; ++i) {
+        const V y = C_[i];
+        const V o = y - x1 + kDcCoef * y1;
+        x1 = y;
+        y1 = o;
+        C_[i] = o;
+      }
+      dcx_ = x1;
+      dcy_ = y1;
+      drv_ = drv;
+    }
+
+    // ---- pass 5: sub, pluck, level, ceiling ----
+    {
+      float mg;
+      switch (mode_) {
+        case Params::kDread: mg = ModeGain::kDread; break;
+        case Params::kDonk: mg = ModeGain::kDonk; break;
+        case Params::kGrowl: mg = ModeGain::kGrowl; break;
+        default: mg = ModeGain::kHoover; break;
+      }
+      V sl = sub_;
+      const V sinc = (subl - sl) * invLen;
+      V dec = dec_, att = att_;
+      const float cA = cA_;
+      for (int i = 0; i < len; ++i) {
+        sl += sinc;
+        att += kAttackCoef * (1.f - att);
+        const V v = (mg * C_[i] + sl * sin2pi(S_[i])) * (dec * att);
+        dec *= cA;
+        out[i] = limit(kOutLevel * v);
+      }
+      sub_ = subl;
+      dec_ = dec;
+      att_ = att;
+    }
+  }
+
+ private:
+  void updateEgCoefs() {
+    // shape EG: about 95 % of the way down after EG TIME
+    const float tau = maxf(egTimeMs_ * 0.001f / 3.f, 1e-4f);
+    lP_ = -1.44269504f / (tau * kSR);
+    lK_ = -1.44269504f / (kKnockTau * kSR);
+    cK_ = exp2f_fast(lK_);
+    // PLUCK: 0 = sustain, else time constant 0.9 s .. ~23 ms
+    if (p_pluck_ <= 0.f) {
+      cA_ = 1.f;
+    } else {
+      const float tA = 0.9f * exp2f_fast(-5.3f * p_pluck_);
+      cA_ = exp2f_fast(-1.44269504f / (tA * kSR));
+    }
+  }
+
+  // parameters
+  float p_timbre_, p_drive_, p_char_, p_sub_, p_knock_, p_pluck_;
+  float egInt_, egTimeMs_, semi_, fine_;
+  int mode_, subOct_, retrig_;
+  float lP_, lK_, cK_, cA_;
+
+  // per lane, control rate
+  float note_[N];
+  float mod_timbre_[N], mod_drive_[N], mod_char_[N], mod_sub_[N], mod_pitch_[N];
+  float lfo_[N];
+  bool jump_[N] = {};
+  bool first_;
+
+  // per lane, audio state
+  V t_, t2_, ts_, tk_, mprev_, s1_, s2_, dcx_, dcy_, osx_, osy_;
+  V penv_, kenv_, dec_, att_;
+  // ramp start values (end of the previous block)
+  V w_, idt_, tim_, idx_, wk_, pw_, drv_, sub_;
+
+  // scratch buffers for the passes
+  V T_[kMaxBlock], T2_[kMaxBlock], S_[kMaxBlock], W_[kMaxBlock], C_[kMaxBlock];
+};
+
+typedef Engine<float> DreadBass1;
+typedef Engine<v4f> DreadBass4;
+
+}  // namespace dread
