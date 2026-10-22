@@ -392,33 +392,44 @@ int main() {
 
   printf("== demos -> test/out/*.wav ==\n");
   {
-    // Each demo is two bars at 170 BPM played the way the synth would: notes
+    // Each demo is a short line played the way the synth would: notes
     // are gated by an amp envelope (1 ms attack, 25 ms release), a note that
     // starts after the last one has died is a fresh voice, an overlapping
     // one is legato. Steps are 16ths.
     struct Step { int at, len; float note; };
     struct Demo { const char *name; Set s; std::vector<Step> steps; };
     std::vector<Demo> demos;
-    // Starter settings from the README
-    { Set s; s.mode = P::kDread; s.timbre = 700; s.drive = 30; s.chr = 70; s.sub = 50; s.pluck = 90; s.egInt = 0; s.egTime = 450;
-      demos.push_back({"dred_bass", s, {{0, 6, 31}, {6, 6, 31}, {12, 4, 29}, {16, 6, 34}, {22, 6, 31}, {28, 4, 26}}}); }
-    { Set s; s.mode = P::kDread; s.timbre = 480; s.drive = 15; s.chr = 45; s.sub = 75; s.pluck = 0; s.egInt = 0; s.egTime = 220;
+    std::vector<int> bpm;
+    // Starter settings from the README. dred_bass and donk follow the
+    // reference loops' tempo, timing and pitches.
+    { Set s; s.mode = P::kDread; s.timbre = 700; s.drive = 0; s.chr = 55; s.sub = 40; s.pluck = 0; s.egInt = 0; s.egTime = 300;
+      demos.push_back({"dred_bass", s, {{0, 4, 36}, {6, 4, 36}, {12, 4, 36}, {16, 8, 34}, {32, 5, 31}, {48, 5, 31}, {54, 5, 30}}});
+      bpm.push_back(175); }
+    { Set s; s.mode = P::kDread; s.timbre = 520; s.drive = 30; s.chr = 70; s.sub = 70; s.pluck = 0; s.egInt = 0; s.egTime = 170;
       demos.push_back({"dread_roller", s, {{0, 3, 31}, {3, 3, 31}, {6, 2, 34}, {8, 4, 31}, {12, 4, 29},
-                                           {16, 3, 31}, {19, 3, 31}, {22, 2, 26}, {24, 4, 29}, {28, 4, 31}}}); }
-    { Set s; s.mode = P::kDonk; s.timbre = 600; s.drive = 20; s.chr = 45; s.sub = 30; s.pluck = 75; s.egInt = 12; s.egTime = 60;
-      demos.push_back({"donk", s, {{0, 1, 36}, {3, 1, 36}, {6, 1, 48}, {8, 1, 36}, {10, 1, 39}, {11, 1, 36}, {14, 1, 43},
-                                   {16, 1, 36}, {19, 1, 36}, {22, 1, 48}, {24, 1, 41}, {26, 1, 39}, {28, 1, 36}, {30, 1, 34}}}); }
+                                           {16, 3, 31}, {19, 3, 31}, {22, 2, 26}, {24, 4, 29}, {28, 4, 31}}});
+      bpm.push_back(170); }
+    { Set s; s.mode = P::kDonk; s.timbre = 512; s.drive = 10; s.chr = 80; s.sub = 20; s.pluck = 0; s.egInt = 0; s.egTime = 250;
+      demos.push_back({"donk", s, {{0, 2, 29}, {3, 1, 29}, {6, 2, 41}, {8, 2, 29}, {10, 1, 32}, {11, 2, 29}, {14, 2, 36},
+                                   {16, 2, 29}, {19, 1, 29}, {22, 2, 41}, {24, 2, 34}, {26, 2, 32}, {28, 2, 29}, {30, 2, 27}}});
+      bpm.push_back(160); }
     { Set s; s.mode = P::kGrowl; s.timbre = 700; s.drive = 45; s.chr = 55; s.sub = 55; s.egInt = 5; s.egTime = 250;
-      demos.push_back({"snarl_fm", s, {{0, 4, 29}, {4, 4, 29}, {8, 2, 32}, {10, 6, 29}, {16, 4, 27}, {20, 4, 29}, {24, 8, 24}}}); }
+      demos.push_back({"snarl_fm", s, {{0, 4, 29}, {4, 4, 29}, {8, 2, 32}, {10, 6, 29}, {16, 4, 27}, {20, 4, 29}, {24, 8, 24}}});
+      bpm.push_back(170); }
     { Set s; s.mode = P::kHoover; s.timbre = 800; s.drive = 20; s.chr = 60; s.sub = 35; s.egInt = 12; s.egTime = 300;
-      demos.push_back({"hoover_dive", s, {{0, 8, 45}, {8, 8, 48}, {16, 8, 43}, {24, 8, 41}}}); }
+      demos.push_back({"hoover_dive", s, {{0, 8, 45}, {8, 8, 48}, {16, 8, 43}, {24, 8, 41}}});
+      bpm.push_back(170); }
 
-    const int step = kRate * 60 / 170 / 4;
-    for (auto &d : demos) {
+    for (size_t di = 0; di < demos.size(); ++di) {
+      auto &d = demos[di];
+      const int step = kRate * 60 / bpm[di] / 4;
+      int lastStep = 0;
+      for (auto &st : d.steps) lastStep = std::max(lastStep, st.at + st.len);
+      lastStep = std::max(lastStep, 32);
       DreadBass1 e;
       e.init();
       apply(e, d.s);
-      const int total = step * 32 + kRate / 4;
+      const int total = step * lastStep + kRate / 4;
       std::vector<float> x;
       x.reserve(total);
       float buf[kMaxBlock];
@@ -428,7 +439,7 @@ int main() {
       const float aUp = 1.f - std::exp(-1.f / (0.001f * kRate)), aDn = 1.f - std::exp(-1.f / (0.025f * kRate));
       for (int pos = 0; pos < total;) {
         if (k < d.steps.size() && d.steps[k].at * step <= pos) {
-          const bool sounding = amp > 1e-4f;
+          const bool sounding = amp > 1e-2f;  // the synth frees a voice once its release is done
           const bool held = pos < gateEnd;
           e.setNote(0, d.steps[k].note);
           e.noteOn(0, !sounding, held);

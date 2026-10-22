@@ -12,18 +12,19 @@
  *
  * Per voice:
  *
- *   MODE   DREAD  the Dead Dred "Dred Bass" trick: an acid line played
- *                 backwards. PolyBLEP saw -> resonant 303-style low-pass
- *                 (2-pole SVF + 1 pole) whose cutoff and level follow a
- *                 REVERSED decay: each note swells in dark and quiet and
- *                 opens up to its squelchy peak over EG TIME. TIMBRE = how
- *                 far the filter opens, CHARACTER = resonance, DRIVE adds
- *                 Amiga-style 8-bit / low-rate crunch on top of the clipper
- *          DONK   FM pluck: sine carrier phase-modulated by a sine 2 octaves
- *                 up (odd sidebands = hollow, woody) plus a square layer,
- *                 into the same low-pass, index and cutoff snapping shut
- *                 with the shape EG. TIMBRE = FM / brightness, CHARACTER =
- *                 resonance ("boing")
+ *   MODE   DREAD  the Dead Dred "Dred Bass" trick: a 303-style square
+ *                 note played backwards. PolyBLEP square -> resonant 24 dB
+ *                 low-pass (2 SVFs) whose cutoff RISES at a steady rate in
+ *                 octaves over EG TIME, from about 2x to 16x the note (the
+ *                 reversed filter decay), level held steady. Measured off a
+ *                 reference loop. TIMBRE = how far it opens, CHARACTER =
+ *                 resonance, DRIVE adds Amiga-style 8-bit / low-rate crunch
+ *          DONK   resonant pulse pluck: a 45 % pulse into the same low-pass
+ *                 with a two-stage envelope (opens ~9x the note, snaps to the
+ *                 5th harmonic in ~25 ms, then sinks ~1 octave over EG TIME).
+ *                 The high resonance ringing on the 5th harmonic is the
+ *                 "donk". Measured off a reference one-shot.
+ *                 TIMBRE = brightness, CHARACTER = resonance
  *          GROWL  2-op FM, 1:1 ratio, index follows the shape EG
  *                 (TIMBRE: index, CHARACTER: modulator feedback)
  *          HOOVER two detuned band-limited pulses with slow PWM
@@ -32,14 +33,13 @@
  *   -> DRIVE (cubic soft clip at 2x rate, gain compensated) -> DC blocker
  *   -> (DREAD) sample-and-hold + bit reduction
  *   + SUB    pure sine, 1 or 2 octaves down, after the drive (never dirty)
- *   x level  DREAD: the reversed swell (sub included). All modes: PLUCK
- *            decay (0 = sustain; in DREAD it starts once the swell peaks)
+ *   x level  PLUCK decay (0 = sustain; in DREAD it starts once the sweep peaks)
  *   -> output limiter (transparent below 0.8, soft knee to 1)
  *
  *   SHAPE EG: one exponential envelope per voice, restarted on note-on.
- *   EG INT (semitones) bends the pitch with it (donk drop, hoover dive); in
- *   GROWL it also lifts the FM index, in DONK it closes index and filter.
- *   In DREAD, EG TIME is the length of the reversed swell.
+ *   EG INT (semitones) bends the pitch with it (hoover dive, pitch drops);
+ *   in GROWL it also lifts the FM index. In DREAD EG TIME is the length of
+ *   the rising sweep, in DONK how long the filter takes to close.
  *
  * CPU rules (learned on Dusty Pads / Rollers, the microKORG 2 runs up to 8
  * voices of this):
@@ -221,8 +221,8 @@ struct Params {
 // Output level per mode so a MODE change stays at about the same loudness
 // (from the desktop tests' RMS measurements, see test/render.cc)
 struct ModeGain {
-  static constexpr float kDread = 0.91f;
-  static constexpr float kDonk = 0.75f;
+  static constexpr float kDread = 0.77f;
+  static constexpr float kDonk = 0.98f;
   static constexpr float kGrowl = 0.86f;
   static constexpr float kHoover = 0.80f;
 };
@@ -232,7 +232,7 @@ constexpr float kOutLevel = 0.55f;    // before the output limiter
 constexpr float kKnockTau = 0.006f;   // knock decay, seconds
 constexpr float kAttackCoef = 0.015f; // de-click when a legato note restarts PLUCK (~1.4 ms)
 constexpr float kDcCoef = 0.99935f;   // DC blocker pole, ~5 Hz
-constexpr float kRevStart = -4.5f;    // reversed swell starts 4.5 octaves down (log2 level)
+constexpr float kDonkFastTau = 0.14f; // DONK fast filter stage, as a share of EG TIME
 
 // ---------------------------------------------------------------------------
 // The engine
@@ -244,11 +244,11 @@ class Engine {
   enum { N = LaneInfo<V>::N };
 
   void init() {
-    p_timbre_ = 650.f / 1023.f;
-    p_drive_ = 0.25f;
+    p_timbre_ = 700.f / 1023.f;
+    p_drive_ = 0.f;
     mode_ = Params::kDread;
-    p_char_ = 0.6f;
-    p_sub_ = 0.55f;
+    p_char_ = 0.55f;
+    p_sub_ = 0.4f;
     subOct_ = 0;
     p_knock_ = 0.f;
     p_pluck_ = 0.f;
@@ -272,11 +272,10 @@ class Engine {
     const V z = splat<V>(0.f);
     t_ = t2_ = ts_ = tk_ = z;
     mprev_ = z;
-    s1_ = s2_ = op_ = z;
+    s1_ = s2_ = s3_ = s4_ = z;
     dcx_ = dcy_ = osx_ = osy_ = z;
     hold_ = hacc_ = z;
-    gz_ = splat<V>(1.f);
-    for (int j = 0; j < N; ++j) lr_[j] = 0.f;
+    for (int j = 0; j < N; ++j) sw_[j] = ef_[j] = es_[j] = 0.f;
     penv_ = kenv_ = z;
     dec_ = att_ = splat<V>(1.f);
     first_ = true;
@@ -328,7 +327,8 @@ class Engine {
       lset(mprev_, lane, 0.f);
       lset(s1_, lane, 0.f);
       lset(s2_, lane, 0.f);
-      lset(op_, lane, 0.f);
+      lset(s3_, lane, 0.f);
+      lset(s4_, lane, 0.f);
       lset(hold_, lane, 0.f);
       lset(hacc_, lane, 0.f);
       lset(dcx_, lane, 0.f);
@@ -336,7 +336,6 @@ class Engine {
       lset(osx_, lane, 0.f);
       lset(osy_, lane, 0.f);
       lset(att_, lane, 1.f);
-      lset(gz_, lane, mode_ == Params::kDread ? exp2f_fast(0.5f * kRevStart) : 1.f);
       lfo_[lane] = 0.f;  // hoover PWM starts the same on every hit
     } else {
       if (legato && !retrig_) {
@@ -350,7 +349,8 @@ class Engine {
     lset(penv_, lane, 1.f);
     lset(kenv_, lane, 1.f);
     lset(dec_, lane, 1.f);
-    lr_[lane] = kRevStart;  // DREAD: start the reversed swell
+    sw_[lane] = 0.f;  // DREAD sweep position
+    ef_[lane] = es_[lane] = 1.f;  // DONK filter envelope
     jump_[lane] = true;  // pitch jumps to the new note instead of ramping
   }
 
@@ -364,9 +364,13 @@ class Engine {
 
     // ---- control rate, per lane ----
     V wEnd, idtEnd, tim, drv, chr, subl, idxEnd, wkEnd, pwEnd;
-    V fa1, fa2, fa3, da1, da2, da3, opc, idxS, idxE, gEnd, cAv, crR, crQ, crIq;
+    V fa1, fa2, fa3, da1, da2, da3, fb1, fb2, fb3, db1, db2, db3, fgain, lpm, bpm, cAv, crR, crQ, crIq;
     float fc0[N], fc1[N], kq[N];
-    const float revRate = -kRevStart / maxf(egTimeMs_ * 0.001f * kSR, 1.f);
+    const float egSamples = maxf(egTimeMs_ * 0.001f * kSR, 1.f);
+    const float swRate = 1.f / egSamples;
+    // DONK: two decays, slow tau = EG TIME, fast tau = kDonkFastTau x EG TIME
+    const float fS = exp2f_fast(-1.44269504f * (float)len / egSamples);
+    const float fF = exp2f_fast(-1.44269504f * (float)len / maxf(kDonkFastTau * egSamples, 48.f));
     float hRatio2 = 1.f, hRatio1 = 1.f;
     if (mode_ == Params::kHoover) {
       const float cents = 4.f + 26.f * clampf(p_char_, 0.f, 1.f);
@@ -423,41 +427,54 @@ class Engine {
       }
       lset(pwEnd, j, pw);
 
-      // DREAD / DONK low-pass: cutoff at the start and end of this block
+      // DREAD / DONK low-pass: cutoff (as log2 multiple of the note) at the
+      // start and end of this block
       if (mode_ == Params::kDread) {
-        // reversed decay: log2 level rises linearly from kRevStart to 0
-        const float lr0 = lr_[j];
-        float lr1 = lr0 + revRate * (float)len;
-        if (lr1 > 0.f) lr1 = 0.f;
-        lr_[j] = lr1;
-        const float fb = maxf(0.75f * w0, 30.f * kInvSR);
-        const float oct = 1.f + 7.f * tm;
-        fc0[j] = fb * exp2f_fast(oct * exp2f_fast(lr0));
-        fc1[j] = fb * exp2f_fast(oct * exp2f_fast(lr1));
-        lset(gEnd, j, exp2f_fast(0.5f * lr1));
-        lset(cAv, j, lr1 < 0.f ? 1.f : cA_);  // PLUCK starts once the swell peaks
-        kq[j] = 1.f / (0.6f + 16.f * ch * ch);
+        // rises at a steady rate in octaves over EG TIME, then holds
+        const float u0 = sw_[j];
+        float u1 = u0 + swRate * (float)len;
+        if (u1 > 1.f) u1 = 1.f;
+        sw_[j] = u1;
+        const float lo = 1.0f, hi = 1.8f + 3.5f * tm;
+        fc0[j] = w0 * exp2f_fast(lo + (hi - lo) * u0);
+        fc1[j] = w0 * exp2f_fast(lo + (hi - lo) * u1);
+        lset(cAv, j, u1 < 1.f ? 1.f : cA_);  // PLUCK starts once the sweep peaks
+        kq[j] = 1.f / (0.7f + 12.f * ch * ch);
+        lset(lpm, j, 1.f);
+        lset(bpm, j, 0.f);
       } else if (mode_ == Params::kDonk) {
-        const float o = 0.8f + (1.f + 5.f * tm);
-        fc0[j] = w0 * exp2f_fast(0.8f + (o - 0.8f) * pe0);
-        fc1[j] = w0 * exp2f_fast(0.8f + (o - 0.8f) * pe);
-        lset(idxS, j, 2.6f * tm * (0.15f + 0.85f * pe0));
-        lset(idxE, j, 2.6f * tm * (0.15f + 0.85f * pe));
-        lset(gEnd, j, 1.f);
+        // resonance sits on the 5th harmonic at the TIMBRE centre: starts
+        // ~1.2 octaves above it, snaps down fast, then sinks ~1 octave slowly
+        const float base = 1.4f + 2.0f * tm;
+        const float f0e = ef_[j], s0e = es_[j];
+        const float f1e = f0e * fF, s1e = s0e * fS;
+        ef_[j] = f1e;
+        es_[j] = s1e;
+        // (the slow sink is squared: it holds on the 5th for a while first)
+        fc0[j] = w0 * exp2f_fast(base + 1.2f * f0e - 1.2f * (1.f - s0e) * (1.f - s0e));
+        fc1[j] = w0 * exp2f_fast(base + 1.2f * f1e - 1.2f * (1.f - s1e) * (1.f - s1e));
         lset(cAv, j, cA_);
-        kq[j] = 1.f / (0.6f + 9.f * ch * ch);
+        kq[j] = 1.f / (0.7f + 12.f * ch * ch);
+        // ladder-style bass loss: part band-pass, so the fundamental drops
+        // under the resonant peak as CHARACTER goes up
+        lset(lpm, j, 1.f - 0.85f * ch);
+        lset(bpm, j, 0.85f * ch);
       } else {
-        lset(gEnd, j, 1.f);
         lset(cAv, j, cA_);
       }
       if (mode_ == Params::kDread || mode_ == Params::kDonk) {
+        // stage 1: resonant SVF, stage 2: Butterworth SVF at the same cutoff
         float b1, b2, b3, e1, e2, e3;
         svfCoefs(fc0[j], kq[j], b1, b2, b3);
         svfCoefs(fc1[j], kq[j], e1, e2, e3);
         lset(fa1, j, b1); lset(fa2, j, b2); lset(fa3, j, b3);
         lset(da1, j, (e1 - b1) * invLen); lset(da2, j, (e2 - b2) * invLen); lset(da3, j, (e3 - b3) * invLen);
-        // the extra pole sits an octave over the cutoff (18 dB-ish slope)
-        lset(opc, j, 1.f - exp2f_fast(-1.44269504f * 6.2831853f * clampf(2.f * fc1[j], 0.f, 0.2f)));
+        svfCoefs(fc0[j], 1.4142136f, b1, b2, b3);
+        svfCoefs(fc1[j], 1.4142136f, e1, e2, e3);
+        lset(fb1, j, b1); lset(fb2, j, b2); lset(fb3, j, b3);
+        lset(db1, j, (e1 - b1) * invLen); lset(db2, j, (e2 - b2) * invLen); lset(db3, j, (e3 - b3) * invLen);
+        // resonance takes some level out of the fundamental: put some back
+        lset(fgain, j, 1.f + 0.35f * (1.f / kq[j] - 0.7f) * 0.1f);
         // DREAD crunch: hold rate 48 kHz -> ~10 kHz, 12 -> 6 bits with DRIVE
         lset(crR, j, exp2f_fast(-2.3f * dv));
         const float q = exp2f_fast(12.f - 6.f * dv);
@@ -509,32 +526,19 @@ class Engine {
     switch (mode_) {
       case Params::kDread:
       case Params::kDonk: {
+        // band-limited square (DREAD) / 45 % pulse (DONK: a few even
+        // harmonics, as in the reference)
         V idt = idt_;
         const V iinc = (idtEnd - idt) * invLen;
-        if (mode_ == Params::kDread) {
-          for (int i = 0; i < len; ++i) {
-            idt += iinc;
-            C_[i] = blepSaw(T_[i], idt);
-          }
-        } else {
-          V idx = idxS;
-          const V xinc = (idxE - idxS) * invLen;
-          for (int i = 0; i < len; ++i) {
-            idt += iinc;
-            idx += xinc;
-            const V t = T_[i];
-            const V m = sin2pi(fracp(4.f * t));
-            const V car = sin2pi(fracp(t + idx * m + 4.f));
-            const V sq = blepSaw(t, idt) - blepSaw(fracp(t + 0.5f), idt);
-            C_[i] = car + 0.35f * sq;
-          }
+        const float pwm = (mode_ == Params::kDonk) ? 0.45f : 0.5f;
+        for (int i = 0; i < len; ++i) {
+          idt += iinc;
+          const V t = T_[i];
+          C_[i] = 0.8f * (blepSaw(t, idt) - blepSaw(fracp(t + pwm), idt));
         }
-        // resonant low-pass: TPT SVF (state soft-limited, so high Q squelches
-        // instead of blowing up) + one pole
-        V s1 = s1_, s2 = s2_, op = op_, c1 = fa1, c2 = fa2, c3 = fa3;
-        // DONK's body is a closed-down, quiet sine: bring it up to about full
-        // scale before the drive so DRIVE behaves like the other modes
-        const float pre = (mode_ == Params::kDonk) ? 2.8f : 1.f;
+        // stage 1: resonant TPT SVF low-pass (state soft-limited, so high Q
+        // squelches instead of blowing up)
+        V s1 = s1_, s2 = s2_, c1 = fa1, c2 = fa2, c3 = fa3;
         for (int i = 0; i < len; ++i) {
           c1 += da1;
           c2 += da2;
@@ -542,14 +546,30 @@ class Engine {
           const V v3 = C_[i] - s2;
           const V v1 = c1 * s1 + c2 * v3;
           const V v2 = s2 + c2 * s1 + c3 * v3;
-          s1 = 3.f * sat(0.4444444f * v1 - 0.2222222f * s1);  // unity slope, limits at +-3
+          s1 = 10.f * sat(0.1333333f * v1 - 0.0666667f * s1);  // unity slope, limits at +-10
           s2 = 2.f * v2 - s2;
-          op += opc * (v2 - op);
-          C_[i] = pre * op;
+          C_[i] = lpm * v2 + bpm * v1;
         }
         s1_ = s1;
         s2_ = s2;
-        op_ = op;
+        // stage 2: Butterworth SVF at the same cutoff (24 dB / oct in total)
+        V s3 = s3_, s4 = s4_;
+        c1 = fb1;
+        c2 = fb2;
+        c3 = fb3;
+        for (int i = 0; i < len; ++i) {
+          c1 += db1;
+          c2 += db2;
+          c3 += db3;
+          const V v3 = C_[i] - s4;
+          const V v1 = c1 * s3 + c2 * v3;
+          const V v2 = s4 + c2 * s3 + c3 * v3;
+          s3 = 2.f * v1 - s3;
+          s4 = 2.f * v2 - s4;
+          C_[i] = fgain * v2;
+        }
+        s3_ = s3;
+        s4_ = s4;
         break;
       }
       case Params::kGrowl: {
@@ -686,17 +706,14 @@ class Engine {
       }
       V sl = sub_;
       const V sinc = (subl - sl) * invLen;
-      V dec = dec_, att = att_, gn = gz_;
-      const V ginc = (gEnd - gn) * invLen;
+      V dec = dec_, att = att_;
       for (int i = 0; i < len; ++i) {
         sl += sinc;
-        gn += ginc;
         att += kAttackCoef * (1.f - att);
-        const V v = (mg * C_[i] + sl * sin2pi(S_[i])) * (dec * att * gn);
+        const V v = (mg * C_[i] + sl * sin2pi(S_[i])) * (dec * att);
         dec *= cAv;
         out[i] = clamp1(limit(kOutLevel * v));  // clamp: float rounding in the knee
       }
-      gz_ = gEnd;
       sub_ = subl;
       dec_ = dec;
       att_ = att;
@@ -729,12 +746,13 @@ class Engine {
   float note_[N];
   float mod_timbre_[N], mod_drive_[N], mod_char_[N], mod_sub_[N], mod_pitch_[N];
   float lfo_[N];
-  float lr_[N];  // DREAD reversed swell, log2 level (kRevStart .. 0)
+  float sw_[N];          // DREAD sweep position 0..1
+  float ef_[N], es_[N];  // DONK fast / slow filter envelopes
   bool jump_[N] = {};
   bool first_;
 
   // per lane, audio state
-  V t_, t2_, ts_, tk_, mprev_, s1_, s2_, op_, dcx_, dcy_, osx_, osy_, hold_, hacc_, gz_;
+  V t_, t2_, ts_, tk_, mprev_, s1_, s2_, s3_, s4_, dcx_, dcy_, osx_, osy_, hold_, hacc_;
   V penv_, kenv_, dec_, att_;
   // ramp start values (end of the previous block)
   V w_, idt_, tim_, idx_, wk_, pw_, drv_, sub_;
