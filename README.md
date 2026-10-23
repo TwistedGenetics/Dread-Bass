@@ -4,7 +4,7 @@ A jungle / drum & bass **character-bass oscillator** for the Korg **microKORG 2*
 
 Four engines for the dirty, percussive end of the low end — **DREAD**, **DONK**, **GROWL** and **HOOVER** — with a note-on **knock**, an optional **pluck** decay, a pitch-bending **shape EG** and a pure sine **sub** that is added after the drive, so it never gets dirty.
 
-**DREAD** is the *Dred Bass* sound: a 303-style square note played backwards, so the resonant filter sweeps **up** through each note at a steady rate and the note ends at its brightest. **DONK** is a resonant pulse pluck, with the filter ringing on the 5th harmonic. Both were tuned by measuring reference samples (a reversed dread loop and a donk one-shot): harmonic content, filter sweep and resonance were matched against them at the same pitch and timing.
+**DREAD** is the *Dred Bass* sound: a 303-style square note played backwards, so the resonant filter sweeps **up** through each note at a steady rate and the note ends at its brightest. **DONK** is a ringing "bonk" over a round body: a tuned ring that snaps down onto the 5th harmonic and dies away, then the bass underneath. Both were tuned by measuring reference samples (a reversed dread loop and a donk one-shot): harmonic content, filter sweep and resonance were matched against them at the same pitch and timing.
 
 It's the sibling of [Rollers](https://github.com/TwistedGenetics/Rollers_Bass): Rollers does the clean sub and the Reese, Dread Bass does dread, donk and growl.
 
@@ -19,7 +19,7 @@ Needs microKORG 2 firmware **2.0.0 or later** (the version that added logue SDK 
 
 Dread Bass then appears at the end of the oscillator list as **Dread**. It's polyphonic, but it's built for mono / legato bass patches.
 
-**`DreadMtr.mk2unit`** (optional, also in each Release) is the same oscillator with its CPU load shown next to MODE, e.g. `DONK 21%` (peak over the last half second; 100 % = out of time, crackles). Load it alongside Dread Bass if you hear crackles and want to know how close to the limit a patch is.
+**`DreadMtr.mk2unit`** (optional, also in each Release) is the same oscillator with its CPU load and note detection shown next to MODE, e.g. `DONK 21%T`. The number is the CPU load (peak over the last half second; 100 % = out of time, crackles). The letters show which ways of detecting a note start the synth has used so far: **E** voice events, **T** trigger bits, **N** note-on, **P** the pitch-jump fallback, **-** none yet. If you see only **P** or **-**, please report it: envelopes then only restart when the pitch changes.
 
 Each Release also has WAV renders of the starter settings below, made by the desktop tests.
 
@@ -34,7 +34,7 @@ Each Release also has WAV renders of the starter settings below, made by the des
 | 2 | **Sub** | 0–100 % | Pure sine sub level, phase-locked to the main osc |
 | 2 | **Sub Oct** | -1 OCT / -2 OCT | Sub one or two octaves down |
 | 2 | **Knock** | 0–100 % | Short pitched blip on note-on (~6 ms), about 2.5 octaves over the note and sweeping down |
-| 2 | **Pluck** | 0–100 % | 0 = sustain. Higher = the whole voice decays faster (0.9 s down to ~25 ms) |
+| 2 | **Pluck** | 0–100 % | 0 = sustain. Higher = the whole voice decays faster after each note start (0.9 s down to ~25 ms) |
 | 3 | **EG Int** | -24…+48 semitones | How far the shape EG bends the pitch. Positive = drops into the note (dread droop, donk drop, hoover dive), negative = rises into it |
 | 3 | **EG Time** | 1–1000 ms | How long the shape EG takes to settle. In DREAD it is also the length of the reversed swell |
 | 3 | **Retrig** | off / on | On: legato notes restart the shape EG, knock and pluck. Off: legato notes only change pitch (rolling basslines). A new key after a release always restarts them |
@@ -46,7 +46,7 @@ Each Release also has WAV renders of the starter settings below, made by the des
 | Mode | Timbre | Charactr | Drive | Sound |
 |---|---|---|---|---|
 | **DREAD** | how far the filter opens by the end of the sweep (about 16x the note at the default) | resonance | clipper + Amiga-style crunch (sample rate down to ~10 kHz, 12 → 6 bits) | Reversed 303: square wave into a resonant 24 dB low-pass whose cutoff rises at a steady rate, in octaves, from about 2x the note to the Timbre setting over **EG Time**, at a steady level. Set EG Time to about your note length. Pluck starts once the sweep has peaked (0 = hold bright) |
-| **DONK** | brightness: where the resonance sits (the 5th harmonic at the centre) | resonance; also takes the fundamental down under the resonant peak, like a ladder filter | clipper | Resonant pluck: a 45 % pulse into the same low-pass, opening about an octave above the 5th harmonic, snapping down onto it in ~35 ms, then sinking about an octave over **EG Time**. The ringing on the 5th harmonic is the "donk" |
+| **DONK** | which harmonic the ring lands on (2nd–8th; 5th at 700) | ring level, from a hint to ~18 dB over the body | clipper (high Charactr also pushes the hit into the output limiter for extra snap) | Ring + body: a sine burst tuned to a harmonic of the note starts ~0.85 octave above it, snaps down onto it in 10–20 ms (the "boing") and fades out over **EG Time**, over a 45 % pulse body through a gentle low-pass. The hit is ring first, round bass after. Matched to a reference donk one-shot |
 | **GROWL** | FM index (2-op, 1:1) | modulator feedback (gritty, saw-ish) | clipper | Snarling mid-range. The shape EG also lifts the FM index on each hit. Put an LFO on Timbre in the virtual patch for talking wobbles |
 | **HOOVER** | PWM depth (slow PWM) | detune of the two pulses (4–30 cents) | clipper | Pulse-hoover with a dive: set EG Int +7…+12 and EG Time 200–400 ms |
 
@@ -60,18 +60,21 @@ Dread Bass adds five modulation destinations: **Timbre**, **Drive**, **Charactr*
 |---|---|---|---|---|---|---|---|---|---|---|
 | **Dred bass** | DREAD | 700 | 0 | 55 % | 40 % | 0 | 0 | 0 | 300 ms | on |
 | **Dread roller** | DREAD | 520 | 30 % | 70 % | 70 % | 0 | 0 | 0 | 170 ms | on |
-| **Donk** | DONK | 512 | 10 % | 80 % | 20 % | 0 | 0 | 0 | 250 ms | on |
+| **Donk** | DONK | 700 | 10 % | 70 % | 20 % | 0 | 35 % | 0 | 250 ms | on |
 | **Snarl FM** | GROWL | 700 | 45 % | 55 % | 55 % | 0 | 0 | +5 | 250 ms | on |
 | **Hoover dive** | HOOVER | 800 | 20 % | 60 % | 35 % | 0 | 0 | +12 | 300 ms | on |
 
-For **Dred bass**, set EG Time to roughly the length of your notes (300 ms suits notes of three to four 16ths at 175 BPM) so each sweep peaks as the note ends; longer notes hold bright at the top. Play **Donk** around F1, short and bouncy. Keep the synth's own filter open and its amp EG at full sustain with a short release: DREAD and DONK have their own filter and envelopes. Let Sub carry the weight.
+For **Dred bass**, set EG Time to roughly the length of your notes (300 ms suits notes of three to four 16ths at 175 BPM) so each sweep peaks as the note ends; longer notes hold bright at the top. Play **Donk** around F1, short and bouncy; EG Time sets how long the ring lasts, Pluck how quickly the body dies. Keep the synth's own filter open and its amp EG at full sustain with a short release: DREAD and DONK have their own filter and envelopes. Let Sub carry the weight.
 
 ## Test checklist (by ear on the hardware)
 
 - Dred bass at 175 BPM: each note sweeps up and ends bright, level steady through the note
 - Each mode at C1, C2, C3: no crackle, steady level when switching MODE
 - Drive 0 → 100 % on each mode: gets dirtier, not much louder; the sub stays solid
-- Donk on fast 16ths: every hit the same, no clicks
+- Pluck at 50 %: every note fades and the next note brings it back
+- EG Int +12, EG Time 100 ms: every note drops in pitch
+- Donk on fast 16ths: every hit rings the same, no clicks
+- DreadMtr: note which letters appear next to MODE after playing a few notes
 - Retrig on / off with legato notes: on restarts the drop, off just slides
 - EG Int -24 and +48, EG Time 1 ms and 1000 ms: no clicks or blow-ups
 - Virtual patch: LFO → Timbre, Drive, Charactr, Sub, Pitch
@@ -81,7 +84,7 @@ For **Dred bass**, set EG Time to roughly the length of your notes (300 ms suits
 
 The DSP runs four voices at once in NEON lanes, in short passes that fit the Cortex-A7's registers (checked in the compiled assembly: no register spills in any sample loop). Only the current mode's passes run, the knock pass is skipped when Knock is 0, and a group of four voices with no sounding voice is skipped.
 
-On a desktop CPU, 8 voices take 7–9 µs per 64-sample buffer (1333 µs of audio); DREAD and DONK (two filter stages) are the heaviest. The real number on the microKORG 2 is what DreadMtr shows. The unit is about 36 KB loaded (code + buffers), under the 48 KB oscillator limit.
+On a desktop CPU, 8 voices take 7–9 µs per 64-sample buffer (1333 µs of audio); DONK and DREAD are the heaviest. The real number on the microKORG 2 is what DreadMtr shows. The unit is about 36 KB loaded (code + buffers), under the 48 KB oscillator limit.
 
 ## Sound quality notes
 

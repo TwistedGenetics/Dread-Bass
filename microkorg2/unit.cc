@@ -7,12 +7,24 @@
  *  engine in core/dreadbass.h (Engine<v4f>). Idle voices are skipped: a group
  *  of four with no sounding voice costs (almost) nothing.
  *
- *  Voice events decide how each note starts:
+ *  Note starts. Everything percussive (shape EG, knock, pluck, the DREAD
+ *  sweep, the DONK ring) restarts on a note start, so finding them reliably
+ *  matters more than anything else here. v1.0 only listened for voice
+ *  events, and on the hardware those don't seem to arrive: the envelopes
+ *  never restarted, PLUCK faded the sound out for good and the EG controls
+ *  did nothing. Now four sources are combined, first one wins, and repeats
+ *  within ~4 ms are ignored so two sources can't double-trigger a note:
+ *    E  unit_osc_voice_event (allocation / steal), with fresh / legato info
+ *    T  the runtime context's per-voice trigger bits (rising edge)
+ *    N  unit_note_on (matched to the voice playing that note)
+ *    P  last resort, only while none of the above has ever been seen: a
+ *       pitch jump of 3/4 semitone or more inside one buffer
+ *  How each note starts:
  *    - a silent voice starts clean (phases at zero, filters cleared)
- *    - a voice still ringing after its key was released keeps its phases
- *      (no click) and restarts its envelopes
- *    - a legato note (the key is still held) restarts the envelopes only
- *      when RETRIG is on
+ *    - a voice still ringing keeps its phases (no click) and restarts its
+ *      envelopes
+ *    - a legato note (key still held, known from voice events only)
+ *      restarts the envelopes only when RETRIG is on
  *  Until the first voice event arrives every voice renders, so nothing goes
  *  silent if the host never sends events.
  *
@@ -21,7 +33,8 @@
  *  microkorg2/waves and vox examples (and Rollers / Dusty Pads).
  *
  *  Built with -DDREAD_LOADMETER (tools/mk2-meter), the MODE display also
- *  shows the CPU load of this unit, e.g. "DONK 21%".
+ *  shows the CPU load of this unit and which note-start sources have been
+ *  seen, e.g. "DONK 21%ET" (E / T / N / P as above, "-" = none yet).
  */
 
 #include "unit.h"
@@ -63,12 +76,40 @@ bool s_active[kMk2MaxVoices];  // sounding (allocated, not yet deallocated)
 bool s_held[kMk2MaxVoices];    // key held (allocated / stolen, not released)
 bool s_events_seen = false;
 
+// Note-start detection (see the top of the file)
+enum { kSrcEvent = 1, kSrcTrigger = 2, kSrcNoteOn = 4, kSrcPitch = 8 };
+constexpr uint32_t kRetrigGuard = 192;  // frames (~4 ms) to ignore a second start
+bool s_pend[kMk2MaxVoices];             // a note start waits for the next render
+bool s_pendFresh[kMk2MaxVoices];
+bool s_pendLegato[kMk2MaxVoices];
+uint32_t s_sinceStart[kMk2MaxVoices];   // frames since the last note start
+float s_lastNote[kMk2MaxVoices];
+uint8_t s_lastTrig = 0;
+uint8_t s_srcSeen = 0;
+int s_noteOnPend = -1;                  // note number from unit_note_on
+
+// Queue a note start for voice v unless one fired very recently
+void requestStart(int v, bool fresh, bool legato, uint8_t src) {
+  s_srcSeen |= src;
+  if (s_pend[v]) {  // a richer source (voice event) can still fill in details
+    if (src == kSrcEvent) {
+      s_pendFresh[v] = fresh;
+      s_pendLegato[v] = legato;
+    }
+    return;
+  }
+  if (s_sinceStart[v] < kRetrigGuard) return;
+  s_pend[v] = true;
+  s_pendFresh[v] = fresh;
+  s_pendLegato[v] = legato;
+}
+
 #ifdef DREAD_LOADMETER
 // Time spent in unit_render as a share of the buffer's real-time length.
 // Peak over ~0.5 s. 100 % = no time left (crackles).
 float s_load_peak = 0.f, s_load_show = 0.f;
 uint32_t s_load_frames = 0;
-char s_meter_str[16];
+char s_meter_str[24];
 inline double nowNs() {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -110,9 +151,15 @@ __attribute__((used)) int8_t unit_init(const unit_runtime_desc_t *desc) {
   s_desc = *desc;
   s_events_seen = false;
   for (int k = 0; k < kNumGroups; ++k) s_group[k].init();
+  s_lastTrig = 0;
+  s_srcSeen = 0;
+  s_noteOnPend = -1;
   for (int v = 0; v < kMk2MaxVoices; ++v) {
     s_active[v] = false;
     s_held[v] = false;
+    s_pend[v] = s_pendFresh[v] = s_pendLegato[v] = false;
+    s_sinceStart[v] = kRetrigGuard;
+    s_lastNote[v] = -1.f;
     for (int d = 0; d < kNumDest; ++d) s_mod[d][v] = 0.f;
   }
   for (int id = 0; id < Params::kNumParams; ++id) {
@@ -139,6 +186,41 @@ __attribute__((used)) void unit_render(const float *in, float *out, uint32_t fra
 #endif
   const unit_runtime_osc_context_t *ctx = context();
   const int n = voiceCount(ctx);
+
+  // ---- note starts: trigger bits, unit_note_on and the pitch fallback ----
+  {
+    const uint8_t trig = ctx->trigger;
+    const uint8_t rise = (uint8_t)(trig & ~s_lastTrig);
+    s_lastTrig = trig;
+    const bool primarySeen = (s_srcSeen & (kSrcEvent | kSrcTrigger | kSrcNoteOn)) != 0;
+    int noteOnVoice = -1;
+    float best = 0.6f;  // the voice playing unit_note_on's note (within a semitone)
+    for (int v = 0; v < n; ++v) {
+      float note = ctx->pitch[v];
+      if (!finiteBits(note) || note < 0.f || note > 140.f) note = 60.f;
+      if (rise & (1u << v)) requestStart(v, s_events_seen && !s_active[v], false, kSrcTrigger);
+      if (s_noteOnPend >= 0) {
+        const float d = __builtin_fabsf(note - (float)s_noteOnPend);
+        if (d < best) {
+          best = d;
+          noteOnVoice = v;
+        }
+      }
+      if (!primarySeen && s_lastNote[v] >= 0.f && __builtin_fabsf(note - s_lastNote[v]) >= 0.75f)
+        requestStart(v, false, false, kSrcPitch);
+      s_lastNote[v] = note;
+    }
+    if (noteOnVoice >= 0) requestStart(noteOnVoice, s_events_seen && !s_active[noteOnVoice], false, kSrcNoteOn);
+    s_noteOnPend = -1;
+    for (int v = 0; v < kMk2MaxVoices; ++v) {
+      if (s_pend[v]) {
+        s_group[v >> 2].noteOn(v & 3, s_pendFresh[v], s_pendLegato[v]);
+        s_pend[v] = false;
+        s_sinceStart[v] = 0;
+      }
+      if (s_sinceStart[v] < kRetrigGuard) s_sinceStart[v] += frames;
+    }
+  }
 
   for (int base = 0; base < n; base += 4) {
     DreadBass4 &grp = s_group[base >> 2];
@@ -207,7 +289,9 @@ __attribute__((used)) const char *unit_get_param_str_value(uint8_t id, int32_t v
   switch (id) {
     case Params::kMode:
 #ifdef DREAD_LOADMETER
-      snprintf(s_meter_str, sizeof s_meter_str, "%s %d%%", Params::modeName(value), (int)(s_load_show * 100.f + 0.5f));
+      snprintf(s_meter_str, sizeof s_meter_str, "%s %d%%%s%s%s%s%s", Params::modeName(value), (int)(s_load_show * 100.f + 0.5f),
+               (s_srcSeen & kSrcEvent) ? "E" : "", (s_srcSeen & kSrcTrigger) ? "T" : "",
+               (s_srcSeen & kSrcNoteOn) ? "N" : "", (s_srcSeen & kSrcPitch) ? "P" : "", s_srcSeen ? "" : "-");
       return s_meter_str;
 #else
       return Params::modeName(value);
@@ -227,20 +311,25 @@ __attribute__((used)) const uint8_t *unit_get_param_bmp_value(uint8_t id, int32_
 
 __attribute__((used)) void unit_set_tempo(uint32_t tempo) { (void)tempo; }
 
+// Mono-style note on (some logue hosts send this to oscillators): matched to
+// the voice playing that note at the next render
+__attribute__((used)) void unit_note_on(uint8_t note, uint8_t velocity) {
+  (void)velocity;
+  s_noteOnPend = note;
+}
+
 // Note events per voice
 __attribute__((used)) void unit_osc_voice_event(uint8_t event, uint8_t voice, uint8_t note, uint8_t velocity) {
   (void)note;
   (void)velocity;
   if (voice >= kMk2MaxVoices) return;
   s_events_seen = true;
-  DreadBass4 &grp = s_group[voice >> 2];
-  const int lane = voice & 3;
   switch (event) {
     case k_voice_event_allocation:
     case k_voice_event_steal:
       // silent voice: clean start. Ringing voice: keep phases.
-      // Key still held: legato (RETRIG decides).
-      grp.noteOn(lane, !s_active[voice], s_active[voice] && s_held[voice]);
+      // Key still held: legato (RETRIG decides). Applied at the next render.
+      requestStart(voice, !s_active[voice], s_active[voice] && s_held[voice], kSrcEvent);
       s_active[voice] = true;
       s_held[voice] = true;
       break;

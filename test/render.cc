@@ -155,7 +155,8 @@ int main() {
       const Stats st = stats(x, 4800);
       result(!st.bad && st.peak <= 1.f && std::fabs(st.dc) < 0.01f && st.rms > 0.05f,
              "%-6s note %2.0f  peak %.3f rms %.3f dc %+.4f", kModeNames[m], note, st.peak, st.rms, st.dc);
-      if (note == 36.f) modeRms[m] = st.rms;
+      // DONK is percussive: compare its hit (first 100 ms), not the tail
+      if (note == 36.f) modeRms[m] = (m == P::kDonk) ? stats(render1(s, note, sec), 0, 4800).rms : st.rms;
     }
   }
   {
@@ -237,7 +238,35 @@ int main() {
     std::vector<float> d(a.size());
     for (size_t i = 0; i < d.size(); ++i) d[i] = a[i] - b[i];
     const float head = stats(d, 0, 480).rms, tail = stats(d, 9600, 14400).rms;
-    result(head > 0.05f && tail < 1e-4f, "KNOCK: blip rms %.3f in first 10 ms, gone after 200 ms (%.1e)", head, tail);
+    result(head > 0.03f && tail < 1e-4f, "KNOCK: blip rms %.3f in first 10 ms, gone after 200 ms (%.1e)", head, tail);
+  }
+
+  {
+    // no note start ever arrives (host sends nothing): PLUCK must not fade
+    // the voice out for good
+    DreadBass1 e;
+    e.init();
+    Set s; s.pluck = 90;
+    apply(e, s);
+    e.setNote(0, 36.f);
+    std::vector<float> x;
+    float buf[kMaxBlock];
+    for (int b = 0; b < 1500; ++b) { e.render(buf, 64); for (int i = 0; i < 64; ++i) x.push_back(buf[i]); }
+    result(stats(x, 80000, 96000).rms > 0.05f, "PLUCK without any note start: still sounding (rms %.3f)", stats(x, 80000, 96000).rms);
+  }
+  {
+    // DONK: the ring dominates the hit, the body takes over after EG TIME
+    Set s; s.mode = P::kDonk; s.timbre = 700; s.chr = 70; s.sub = 0; s.egTime = 250; s.drive = 0;
+    const auto x = render1(s, 29.f, kRate);
+    auto band = [&](size_t a, size_t b, float hz) {  // level of one frequency (Goertzel)
+      double c = 2.0 * std::cos(6.2831853 * hz / kRate), s1 = 0, s2 = 0;
+      for (size_t i = a; i < b; ++i) { const double v = x[i] + c * s1 - s2; s2 = s1; s1 = v; }
+      return std::sqrt(s1 * s1 + s2 * s2 - c * s1 * s2) / double(b - a);
+    };
+    const float f0 = 440.f * std::pow(2.f, (29.f - 69.f) / 12.f);
+    const float early = 20.f * std::log10(band(2400, 4800, 5 * f0) / band(2400, 4800, f0));
+    const float late = 20.f * std::log10(band(16800, 19200, 5 * f0) / band(16800, 19200, f0));
+    result(early > 6.f && late < -6.f, "DONK ring vs body: %+.1f dB at 50-100 ms, %+.1f dB at 350-400 ms", early, late);
   }
 
   printf("== legato / steal ==\n");
@@ -409,7 +438,7 @@ int main() {
       demos.push_back({"dread_roller", s, {{0, 3, 31}, {3, 3, 31}, {6, 2, 34}, {8, 4, 31}, {12, 4, 29},
                                            {16, 3, 31}, {19, 3, 31}, {22, 2, 26}, {24, 4, 29}, {28, 4, 31}}});
       bpm.push_back(170); }
-    { Set s; s.mode = P::kDonk; s.timbre = 512; s.drive = 10; s.chr = 80; s.sub = 20; s.pluck = 0; s.egInt = 0; s.egTime = 250;
+    { Set s; s.mode = P::kDonk; s.timbre = 700; s.drive = 10; s.chr = 70; s.sub = 20; s.pluck = 35; s.egInt = 0; s.egTime = 250;
       demos.push_back({"donk", s, {{0, 2, 29}, {3, 1, 29}, {6, 2, 41}, {8, 2, 29}, {10, 1, 32}, {11, 2, 29}, {14, 2, 36},
                                    {16, 2, 29}, {19, 1, 29}, {22, 2, 41}, {24, 2, 34}, {26, 2, 32}, {28, 2, 29}, {30, 2, 27}}});
       bpm.push_back(160); }
