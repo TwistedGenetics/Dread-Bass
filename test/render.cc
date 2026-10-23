@@ -255,7 +255,7 @@ int main() {
     result(stats(x, 80000, 96000).rms > 0.05f, "PLUCK without any note start: still sounding (rms %.3f)", stats(x, 80000, 96000).rms);
   }
   {
-    // DONK: the ring dominates the hit, the body takes over after EG TIME
+    // DONK: the ring leads the hit, the body takes over after EG TIME
     Set s; s.mode = P::kDonk; s.timbre = 700; s.chr = 70; s.sub = 0; s.egTime = 250; s.drive = 0;
     const auto x = render1(s, 29.f, kRate);
     auto band = [&](size_t a, size_t b, float hz) {  // level of one frequency (Goertzel)
@@ -264,9 +264,9 @@ int main() {
       return std::sqrt(s1 * s1 + s2 * s2 - c * s1 * s2) / double(b - a);
     };
     const float f0 = 440.f * std::pow(2.f, (29.f - 69.f) / 12.f);
-    const float early = 20.f * std::log10(band(2400, 4800, 5 * f0) / band(2400, 4800, f0));
+    const float early = 20.f * std::log10(band(480, 1920, 5 * f0) / band(480, 1920, f0));
     const float late = 20.f * std::log10(band(16800, 19200, 5 * f0) / band(16800, 19200, f0));
-    result(early > 6.f && late < -6.f, "DONK ring vs body: %+.1f dB at 50-100 ms, %+.1f dB at 350-400 ms", early, late);
+    result(early > 3.f && late < -6.f, "DONK ring vs body: %+.1f dB at 10-40 ms, %+.1f dB at 350-400 ms", early, late);
   }
 
   printf("== legato / steal ==\n");

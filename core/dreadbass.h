@@ -19,16 +19,15 @@
  *                 reversed filter decay), level held steady. Measured off a
  *                 reference loop. TIMBRE = how far it opens, CHARACTER =
  *                 resonance, DRIVE adds Amiga-style 8-bit / low-rate crunch
- *          DONK   a ringing "bonk" over a round body: a 45 % pulse through a
+ *          DONK   a hollow "bonk" over a round body: a 45 % pulse through a
  *                 gentle low-pass at ~3x the note (the body) plus a sine
  *                 burst tuned to a harmonic of the note (the ring). The ring
- *                 starts ~0.85 octave above its harmonic, snaps down onto it
- *                 in ~10-20 ms (the "boing"), and dies away over EG TIME,
- *                 starting up to ~12 dB louder than the body, so the hit is
- *                 ring first and round bass after. TIMBRE = ring harmonic
- *                 (2nd..8th, 5th at 700), CHARACTER = ring level.
- *                 Measured off a reference one-shot.
- *                 TIMBRE = brightness, CHARACTER = resonance
+ *                 starts ~1/3 octave above its harmonic, drops onto it in a
+ *                 few ms and fades over EG TIME (cubic, so it is front-
+ *                 loaded). It never rings above ~420 Hz: on higher notes it
+ *                 moves to a lower harmonic, so it stays a bonk rather than
+ *                 a squeal. TIMBRE = ring harmonic (2nd..8th, 5th at 700),
+ *                 CHARACTER = ring level (up to ~+14 dB over the body).
  *          GROWL  2-op FM, 1:1 ratio, index follows the shape EG
  *                 (TIMBRE: index, CHARACTER: modulator feedback)
  *          HOOVER two detuned band-limited pulses with slow PWM
@@ -227,7 +226,7 @@ struct Params {
 // (from the desktop tests' RMS measurements, see test/render.cc)
 struct ModeGain {
   static constexpr float kDread = 0.77f;
-  static constexpr float kDonk = 0.47f;
+  static constexpr float kDonk = 0.58f;
   static constexpr float kGrowl = 0.86f;
   static constexpr float kHoover = 0.80f;
 };
@@ -237,7 +236,8 @@ constexpr float kOutLevel = 0.55f;    // before the output limiter
 constexpr float kKnockTau = 0.006f;   // knock decay, seconds
 constexpr float kAttackCoef = 0.015f; // de-click when a legato note restarts PLUCK (~1.4 ms)
 constexpr float kDcCoef = 0.99935f;   // DC blocker pole, ~5 Hz
-constexpr float kDonkSnapDepth = 0.85f;  // DONK ring starts this many octaves above its target
+constexpr float kDonkSnapDepth = 0.35f;  // DONK ring starts this many octaves above its target
+constexpr float kDonkRingMaxHz = 420.f;  // the ring drops to a lower harmonic rather than go above this
 
 // ---------------------------------------------------------------------------
 // The engine
@@ -386,7 +386,7 @@ class Engine {
     const float swRate = 1.f / egSamples;
     // DONK: ring length = EG TIME; the snap (6 ms + 4 % of EG TIME)
     const float duRing = (float)len / egSamples;
-    const float fF = exp2f_fast(-1.44269504f * (float)len / (0.006f * kSR + 0.04f * egSamples));
+    const float fF = exp2f_fast(-1.44269504f * (float)len / (0.003f * kSR + 0.02f * egSamples));
     float hRatio2 = 1.f, hRatio1 = 1.f;
     if (mode_ == Params::kHoover) {
       const float cents = 4.f + 26.f * clampf(p_char_, 0.f, 1.f);
@@ -467,12 +467,17 @@ class Engine {
         float u1 = es_[j] + duRing;
         if (u1 > 1.f) u1 = 1.f;
         es_[j] = u1;
-        const float s1e = (1.f - u1) * (1.f - u1);
-        const float h = (float)(int32_t)(exp2f_fast(1.f + 2.f * tm) + 0.5f);
+        const float s1e = (1.f - u1) * (1.f - u1) * (1.f - u1);
+        float h = (float)(int32_t)(exp2f_fast(1.f + 2.f * tm) + 0.5f);
+        // keep the ring a "bonk", not a whistle: on higher notes it moves
+        // down to a lower harmonic (never below the 2nd)
+        const float hMaxHz = (float)(int32_t)(kDonkRingMaxHz * kInvSR / w0);
+        if (h > hMaxHz) h = hMaxHz;
+        if (h < 2.f) h = 2.f;
         const float rmax = 0.42f / w;  // keep the ring under ~20 kHz
         lset(rr0, j, minf(h * exp2f_fast(kDonkSnapDepth * f0e), rmax));
         lset(rr1, j, minf(h * exp2f_fast(kDonkSnapDepth * f1e), rmax));
-        const float amt = 0.5f + 7.5f * ch * __builtin_sqrtf(ch);  // ring vs body: up to ~+18 dB
+        const float amt = 0.4f + 4.6f * ch * __builtin_sqrtf(ch);  // ring vs body: up to ~+14 dB
         lset(rg0, j, rgz_[j]);
         rgz_[j] = amt * s1e;
         lset(rg1, j, rgz_[j]);
