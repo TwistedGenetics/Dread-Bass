@@ -169,7 +169,7 @@ int main() {
       hi = std::fmax(hi, modeRms[m]);
     }
     result(hi / lo < 1.41f, "mode loudness spread at C2 (DREAD/GROWL/HOOVER): %.2f dB", 20.f * std::log10(hi / lo));
-    Set d; d.mode = P::kDonk; d.chr = 80; d.sub = 20; d.egTime = 220; d.drive = 0;
+    Set d; d.mode = P::kDonk; d.chr = 55; d.sub = 20; d.egTime = 300; d.drive = 0;
     const auto x = render1(d, 36.f, sec / 2);
     const Stats st = stats(x, 0, 4800);
     float over = 0.f;
@@ -268,7 +268,7 @@ int main() {
   }
   {
     // DONK: the resonance rings on the 5th harmonic, then fades in place
-    Set s; s.mode = P::kDonk; s.timbre = 700; s.chr = 80; s.sub = 0; s.egTime = 220; s.drive = 0;
+    Set s; s.mode = P::kDonk; s.timbre = 700; s.chr = 55; s.sub = 0; s.egTime = 300; s.drive = 0;
     const auto x = render1(s, 37.f, kRate);
     auto band = [&](size_t a, size_t b, float hz) {  // level of one frequency (Goertzel)
       double c = 2.0 * std::cos(6.2831853 * hz / kRate), s1 = 0, s2 = 0;
@@ -466,7 +466,7 @@ int main() {
       demos.push_back({"dread_roller", s, {{0, 3, 31}, {3, 3, 31}, {6, 2, 34}, {8, 4, 31}, {12, 4, 29},
                                            {16, 3, 31}, {19, 3, 31}, {22, 2, 26}, {24, 4, 29}, {28, 4, 31}}});
       bpm.push_back(170); }
-    { Set s; s.mode = P::kDonk; s.timbre = 700; s.drive = 0; s.chr = 80; s.sub = 20; s.pluck = 0; s.egInt = 0; s.egTime = 220;
+    { Set s; s.mode = P::kDonk; s.timbre = 700; s.drive = 0; s.chr = 55; s.sub = 20; s.pluck = 0; s.egInt = 0; s.egTime = 300;
       demos.push_back({"donk", s, {{0, 2, 29}, {3, 1, 29}, {6, 2, 41}, {8, 2, 29}, {10, 1, 32}, {11, 2, 29}, {14, 2, 36},
                                    {16, 2, 29}, {19, 1, 29}, {22, 2, 41}, {24, 2, 34}, {26, 2, 32}, {28, 2, 29}, {30, 2, 27}}});
       bpm.push_back(160); }

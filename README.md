@@ -60,11 +60,11 @@ Dread Bass adds five modulation destinations: **Timbre**, **Drive**, **Charactr*
 |---|---|---|---|---|---|---|---|---|---|---|
 | **Dred bass** | DREAD | 700 | 0 | 55 % | 40 % | 0 | 0 | 0 | 300 ms | on |
 | **Dread roller** | DREAD | 520 | 30 % | 70 % | 70 % | 0 | 0 | 0 | 170 ms | on |
-| **Donk** | DONK | 700 | 0 | 80 % | 20 % | 0 | 0 | 0 | 220 ms | on |
+| **Donk** | DONK | 700 | 0 | 55 % | 0–20 % | 0 | 0 | 0 | 300 ms | on |
 | **Snarl FM** | GROWL | 700 | 45 % | 55 % | 55 % | 0 | 0 | +5 | 250 ms | on |
 | **Hoover dive** | HOOVER | 800 | 20 % | 60 % | 35 % | 0 | 0 | +12 | 300 ms | on |
 
-For **Dred bass**, set EG Time to roughly the length of your notes (300 ms suits notes of three to four 16ths at 175 BPM) so each sweep peaks as the note ends; longer notes hold bright at the top. Play **Donk** short and bouncy, around C#1–C#2; EG Time sets how long it rings (shorter = tighter), Charactr how hard. Keep the synth's own filter open and its amp EG at full sustain with a short release: DREAD and DONK have their own filter and envelopes. Let Sub carry the weight.
+For **Dred bass**, set EG Time to roughly the length of your notes (300 ms suits notes of three to four 16ths at 175 BPM) so each sweep peaks as the note ends; longer notes hold bright at the top. Play **Donk** short and bouncy, around C#1–C#2. The unit's defaults (Charactr 55 %, EG Time 300 ms) are the measured sweet spot, so just switch Mode to DONK; keep Sub low, since the sub sine muddies the ring. EG Time sets how long it rings (shorter = tighter), Charactr how hard. Keep the synth's own filter open and its amp EG at full sustain with a short release: DREAD and DONK have their own filter and envelopes. Let Sub carry the weight.
 
 ## Test checklist (by ear on the hardware)
 

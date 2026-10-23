@@ -387,8 +387,10 @@ class Engine {
     const float swRate = 1.f / egSamples;
     // DONK: ring length = EG TIME; the snap (6 ms + 4 % of EG TIME)
     // DONK: filter snap (10 ms + 4 % of EG TIME), ring fades over EG TIME
-    const float duRing = (float)len / egSamples;
-    const float fF = exp2f_fast(-1.44269504f * (float)len / (0.010f * kSR + 0.04f * egSamples));
+    // (scaled so the default EG TIME of 300 ms gives the reference's ~220 ms)
+    const float donkEg = 0.73f * egSamples;
+    const float duRing = (float)len / donkEg;
+    const float fF = exp2f_fast(-1.44269504f * (float)len / (0.010f * kSR + 0.04f * donkEg));
     float hRatio2 = 1.f, hRatio1 = 1.f;
     if (mode_ == Params::kHoover) {
       const float cents = 4.f + 26.f * clampf(p_char_, 0.f, 1.f);
@@ -476,7 +478,9 @@ class Engine {
         fc0[j] = w0 * exp2f_fast(lt + kDonkSnapDepth * f0e - kDonkSink * k0);
         fc1[j] = w0 * exp2f_fast(lt + kDonkSnapDepth * f1e - kDonkSink * k1);
         // the resonance itself dies away after the hold ((1 - k)^4 fade)
-        const float qp = 40.f * ch * ch;
+        // (the sweet spot measured off the reference, Q ~25, sits at the
+        // default CHARACTER of 55 %)
+        const float qp = 85.f * ch * ch;
         const float r0 = (1.f - k0) * (1.f - k0), r1 = (1.f - k1) * (1.f - k1);
         kq0[j] = 1.f / (0.7f + qp * r0 * r0);
         kq[j] = 1.f / (0.7f + qp * r1 * r1);
