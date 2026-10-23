@@ -4,7 +4,7 @@ A jungle / drum & bass **character-bass oscillator** for the Korg **microKORG 2*
 
 Four engines for the dirty, percussive end of the low end — **DREAD**, **DONK**, **GROWL** and **HOOVER** — with a note-on **knock**, an optional **pluck** decay, a pitch-bending **shape EG** and a pure sine **sub** that is added after the drive, so it never gets dirty.
 
-**DREAD** is the *Dred Bass* sound: a 303-style square note played backwards, so the resonant filter sweeps **up** through each note at a steady rate and the note ends at its brightest. **DONK** is a hollow "bonk" over a round body: a short tuned ring on a harmonic of the note, then the bass underneath. Both were tuned by measuring reference samples (a reversed dread loop and a donk one-shot): harmonic content, filter sweep and resonance were matched against them at the same pitch and timing.
+**DREAD** is the *Dred Bass* sound: a 303-style square note played backwards, so the resonant filter sweeps **up** through each note at a steady rate and the note ends at its brightest. **DONK** is a square wave through a very resonant filter that lands on the 5th harmonic and rings there for a moment: the classic donk. Both were tuned by measuring reference samples (a reversed dread loop and a donk one-shot): harmonic content, filter sweep and resonance were matched against them at the same pitch and timing.
 
 It's the sibling of [Rollers](https://github.com/TwistedGenetics/Rollers_Bass): Rollers does the clean sub and the Reese, Dread Bass does dread, donk and growl.
 
@@ -46,7 +46,7 @@ Each Release also has WAV renders of the starter settings below, made by the des
 | Mode | Timbre | Charactr | Drive | Sound |
 |---|---|---|---|---|
 | **DREAD** | how far the filter opens by the end of the sweep (about 16x the note at the default) | resonance | clipper + Amiga-style crunch (sample rate down to ~10 kHz, 12 → 6 bits) | Reversed 303: square wave into a resonant 24 dB low-pass whose cutoff rises at a steady rate, in octaves, from about 2x the note to the Timbre setting over **EG Time**, at a steady level. Set EG Time to about your note length. Pluck starts once the sweep has peaked (0 = hold bright) |
-| **DONK** | which harmonic the ring lands on (2nd–8th; 5th at 700). The ring never goes above ~420 Hz: on higher notes it drops to a lower harmonic | ring level, from a hint to ~14 dB over the body | clipper (high Charactr also pushes the hit into the output limiter for extra snap) | Hollow bonk + round body: a sine burst tuned to a harmonic of the note drops onto it from 1/3 octave above in a few ms and fades over **EG Time**, front-loaded, over a 45 % pulse body through a gentle low-pass. For less ring, lower Charactr or Timbre; for a shorter one, shorten EG Time |
+| **DONK** | which harmonic the resonance lands on (~2nd–8th; 5th at 700) | resonance: how hard it rings | clipper, on top of the saturation built into DONK | Square wave into a very resonant 24 dB low-pass, saturated between its two stages. The cutoff opens ~1.3 octaves above the ring harmonic, settles onto it within ~40 ms and rings there, then the resonance dies away over **EG Time** so the ring fades in place. No pitch drop: the "donk" is the resonance landing on a harmonic. Matched harmonic by harmonic to a reference donk loop |
 | **GROWL** | FM index (2-op, 1:1) | modulator feedback (gritty, saw-ish) | clipper | Snarling mid-range. The shape EG also lifts the FM index on each hit. Put an LFO on Timbre in the virtual patch for talking wobbles |
 | **HOOVER** | PWM depth (slow PWM) | detune of the two pulses (4–30 cents) | clipper | Pulse-hoover with a dive: set EG Int +7…+12 and EG Time 200–400 ms |
 
@@ -60,11 +60,11 @@ Dread Bass adds five modulation destinations: **Timbre**, **Drive**, **Charactr*
 |---|---|---|---|---|---|---|---|---|---|---|
 | **Dred bass** | DREAD | 700 | 0 | 55 % | 40 % | 0 | 0 | 0 | 300 ms | on |
 | **Dread roller** | DREAD | 520 | 30 % | 70 % | 70 % | 0 | 0 | 0 | 170 ms | on |
-| **Donk** | DONK | 700 | 10 % | 70 % | 20 % | 0 | 35 % | 0 | 250 ms | on |
+| **Donk** | DONK | 700 | 0 | 80 % | 20 % | 0 | 0 | 0 | 220 ms | on |
 | **Snarl FM** | GROWL | 700 | 45 % | 55 % | 55 % | 0 | 0 | +5 | 250 ms | on |
 | **Hoover dive** | HOOVER | 800 | 20 % | 60 % | 35 % | 0 | 0 | +12 | 300 ms | on |
 
-For **Dred bass**, set EG Time to roughly the length of your notes (300 ms suits notes of three to four 16ths at 175 BPM) so each sweep peaks as the note ends; longer notes hold bright at the top. Play **Donk** around F1, short and bouncy; EG Time sets how long the ring lasts, Pluck how quickly the body dies. Keep the synth's own filter open and its amp EG at full sustain with a short release: DREAD and DONK have their own filter and envelopes. Let Sub carry the weight.
+For **Dred bass**, set EG Time to roughly the length of your notes (300 ms suits notes of three to four 16ths at 175 BPM) so each sweep peaks as the note ends; longer notes hold bright at the top. Play **Donk** short and bouncy, around C#1–C#2; EG Time sets how long it rings (shorter = tighter), Charactr how hard. Keep the synth's own filter open and its amp EG at full sustain with a short release: DREAD and DONK have their own filter and envelopes. Let Sub carry the weight.
 
 ## Test checklist (by ear on the hardware)
 
@@ -73,7 +73,7 @@ For **Dred bass**, set EG Time to roughly the length of your notes (300 ms suits
 - Drive 0 → 100 % on each mode: gets dirtier, not much louder; the sub stays solid
 - Pluck at 50 %: every note fades and the next note brings it back
 - EG Int +12, EG Time 100 ms: every note drops in pitch
-- Donk on fast 16ths: every hit rings the same, no clicks
+- Donk on fast 16ths: every hit rings the same, no clicks or whistle
 - DreadMtr: note which letters appear next to MODE after playing a few notes
 - Retrig on / off with legato notes: on restarts the drop, off just slides
 - EG Int -24 and +48, EG Time 1 ms and 1000 ms: no clicks or blow-ups

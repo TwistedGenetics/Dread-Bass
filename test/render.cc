@@ -155,15 +155,27 @@ int main() {
       const Stats st = stats(x, 4800);
       result(!st.bad && st.peak <= 1.f && std::fabs(st.dc) < 0.01f && st.rms > 0.05f,
              "%-6s note %2.0f  peak %.3f rms %.3f dc %+.4f", kModeNames[m], note, st.peak, st.rms, st.dc);
-      // DONK is percussive: compare its hit (first 100 ms), not the tail
-      if (note == 36.f) modeRms[m] = (m == P::kDonk) ? stats(render1(s, note, sec), 0, 4800).rms : st.rms;
+      if (note == 36.f) modeRms[m] = st.rms;
     }
   }
   {
+    // DONK is a resonant pluck, so it's levelled by its peak, not its RMS:
+    // the sustained modes are compared by RMS, DONK's hit must peak high
+    // without being flattened by the output limiter
     float lo = 1e9, hi = 0;
-    for (float r : modeRms) { lo = std::fmin(lo, r); hi = std::fmax(hi, r); }
-    result(hi / lo < 1.41f, "mode loudness spread at C2: %.2f dB (rms %.3f %.3f %.3f %.3f)",
-           20.f * std::log10(hi / lo), modeRms[0], modeRms[1], modeRms[2], modeRms[3]);
+    for (int m = 0; m < 4; ++m) {
+      if (m == P::kDonk) continue;
+      lo = std::fmin(lo, modeRms[m]);
+      hi = std::fmax(hi, modeRms[m]);
+    }
+    result(hi / lo < 1.41f, "mode loudness spread at C2 (DREAD/GROWL/HOOVER): %.2f dB", 20.f * std::log10(hi / lo));
+    Set d; d.mode = P::kDonk; d.chr = 80; d.sub = 20; d.egTime = 220; d.drive = 0;
+    const auto x = render1(d, 36.f, sec / 2);
+    const Stats st = stats(x, 0, 4800);
+    float over = 0.f;
+    for (int i = 0; i < 4800; ++i) over += std::fabs(x[i]) > 0.8f;
+    result(st.peak > 0.6f && over / 4800.f < 0.02f, "DONK hit peak %.2f, %.1f %% of samples in the limiter knee", st.peak,
+           100.f * over / 4800.f);
   }
 
   printf("== tuning (EG INT 0, sine) ==\n");
@@ -255,18 +267,34 @@ int main() {
     result(stats(x, 80000, 96000).rms > 0.05f, "PLUCK without any note start: still sounding (rms %.3f)", stats(x, 80000, 96000).rms);
   }
   {
-    // DONK: the ring leads the hit, the body takes over after EG TIME
-    Set s; s.mode = P::kDonk; s.timbre = 700; s.chr = 70; s.sub = 0; s.egTime = 250; s.drive = 0;
-    const auto x = render1(s, 29.f, kRate);
+    // DONK: the resonance rings on the 5th harmonic, then fades in place
+    Set s; s.mode = P::kDonk; s.timbre = 700; s.chr = 80; s.sub = 0; s.egTime = 220; s.drive = 0;
+    const auto x = render1(s, 37.f, kRate);
     auto band = [&](size_t a, size_t b, float hz) {  // level of one frequency (Goertzel)
       double c = 2.0 * std::cos(6.2831853 * hz / kRate), s1 = 0, s2 = 0;
       for (size_t i = a; i < b; ++i) { const double v = x[i] + c * s1 - s2; s2 = s1; s1 = v; }
       return std::sqrt(s1 * s1 + s2 * s2 - c * s1 * s2) / double(b - a);
     };
-    const float f0 = 440.f * std::pow(2.f, (29.f - 69.f) / 12.f);
-    const float early = 20.f * std::log10(band(480, 1920, 5 * f0) / band(480, 1920, f0));
-    const float late = 20.f * std::log10(band(16800, 19200, 5 * f0) / band(16800, 19200, f0));
-    result(early > 3.f && late < -6.f, "DONK ring vs body: %+.1f dB at 10-40 ms, %+.1f dB at 350-400 ms", early, late);
+    const float f0 = 440.f * std::pow(2.f, (37.f - 69.f) / 12.f);
+    // compare with the same note at no resonance: the 5th must ring well
+    // above it during the hit and be back near it once the ring has faded
+    Set n = s; n.chr = 0;
+    const auto y = render1(n, 37.f, kRate);
+    auto bandOf = [&](const std::vector<float> &v, size_t a, size_t b, float hz) {
+      double c = 2.0 * std::cos(6.2831853 * hz / kRate), s1 = 0, s2 = 0;
+      for (size_t i = a; i < b; ++i) { const double q = v[i] + c * s1 - s2; s2 = s1; s1 = q; }
+      return std::sqrt(s1 * s1 + s2 * s2 - c * s1 * s2);
+    };
+    auto rel = [&](const std::vector<float> &v, size_t a, size_t b) {
+      return 20.f * std::log10(bandOf(v, a, b, 5 * f0) / bandOf(v, a, b, f0));
+    };
+    (void)band;
+    // (the reference has the 5th within a few dB of the fundamental during
+    // the ring, ~-14 dB for a plain square, and back down after it)
+    const float early = rel(x, 1440, 3840), late = rel(x, 16800, 19200);
+    const float plain = rel(y, 1440, 3840);
+    result(early > -4.f && early - plain > 3.f && late < -10.f,
+           "DONK 5th vs fundamental: %+.1f dB at 30-80 ms (no resonance: %+.1f), %+.1f dB at 350-400 ms", early, plain, late);
   }
 
   printf("== legato / steal ==\n");
@@ -438,7 +466,7 @@ int main() {
       demos.push_back({"dread_roller", s, {{0, 3, 31}, {3, 3, 31}, {6, 2, 34}, {8, 4, 31}, {12, 4, 29},
                                            {16, 3, 31}, {19, 3, 31}, {22, 2, 26}, {24, 4, 29}, {28, 4, 31}}});
       bpm.push_back(170); }
-    { Set s; s.mode = P::kDonk; s.timbre = 700; s.drive = 10; s.chr = 70; s.sub = 20; s.pluck = 35; s.egInt = 0; s.egTime = 250;
+    { Set s; s.mode = P::kDonk; s.timbre = 700; s.drive = 0; s.chr = 80; s.sub = 20; s.pluck = 0; s.egInt = 0; s.egTime = 220;
       demos.push_back({"donk", s, {{0, 2, 29}, {3, 1, 29}, {6, 2, 41}, {8, 2, 29}, {10, 1, 32}, {11, 2, 29}, {14, 2, 36},
                                    {16, 2, 29}, {19, 1, 29}, {22, 2, 41}, {24, 2, 34}, {26, 2, 32}, {28, 2, 29}, {30, 2, 27}}});
       bpm.push_back(160); }

@@ -19,15 +19,17 @@
  *                 reversed filter decay), level held steady. Measured off a
  *                 reference loop. TIMBRE = how far it opens, CHARACTER =
  *                 resonance, DRIVE adds Amiga-style 8-bit / low-rate crunch
- *          DONK   a hollow "bonk" over a round body: a 45 % pulse through a
- *                 gentle low-pass at ~3x the note (the body) plus a sine
- *                 burst tuned to a harmonic of the note (the ring). The ring
- *                 starts ~1/3 octave above its harmonic, drops onto it in a
- *                 few ms and fades over EG TIME (cubic, so it is front-
- *                 loaded). It never rings above ~420 Hz: on higher notes it
- *                 moves to a lower harmonic, so it stays a bonk rather than
- *                 a squeal. TIMBRE = ring harmonic (2nd..8th, 5th at 700),
- *                 CHARACTER = ring level (up to ~+14 dB over the body).
+ *          DONK   square -> the same resonant 24 dB low-pass, Q up to ~25.
+ *                 The cutoff opens ~1.3 octaves above the ring harmonic,
+ *                 settles onto it within ~40 ms and rings there, then
+ *                 the resonance dies away over EG TIME (the cutoff closing
+ *                 only ~1/3 octave), so the ring fades in place.
+ *                 No pitch drop: the "donk" is the resonance landing on a
+ *                 harmonic (5th by default). Measured off a donk loop.
+ *                 TIMBRE = ring harmonic (~2nd..8th, 5th at 700),
+ *                 CHARACTER = resonance. Saturated between the two filter
+ *                 stages, so the ring doesn't tower over the body and the
+ *                 tail is a dark, rounded square.
  *          GROWL  2-op FM, 1:1 ratio, index follows the shape EG
  *                 (TIMBRE: index, CHARACTER: modulator feedback)
  *          HOOVER two detuned band-limited pulses with slow PWM
@@ -42,7 +44,7 @@
  *   SHAPE EG: one exponential envelope per voice, restarted on note-on.
  *   EG INT (semitones) bends the pitch with it (hoover dive, pitch drops);
  *   in GROWL it also lifts the FM index. In DREAD EG TIME is the length of
- *   the rising sweep, in DONK how long the ring takes to die away.
+ *   the rising sweep, in DONK how long the filter takes to close.
  *
  * CPU rules (learned on Dusty Pads / Rollers, the microKORG 2 runs up to 8
  * voices of this):
@@ -226,7 +228,7 @@ struct Params {
 // (from the desktop tests' RMS measurements, see test/render.cc)
 struct ModeGain {
   static constexpr float kDread = 0.77f;
-  static constexpr float kDonk = 0.58f;
+  static constexpr float kDonk = 0.85f;
   static constexpr float kGrowl = 0.86f;
   static constexpr float kHoover = 0.80f;
 };
@@ -236,8 +238,11 @@ constexpr float kOutLevel = 0.55f;    // before the output limiter
 constexpr float kKnockTau = 0.006f;   // knock decay, seconds
 constexpr float kAttackCoef = 0.015f; // de-click when a legato note restarts PLUCK (~1.4 ms)
 constexpr float kDcCoef = 0.99935f;   // DC blocker pole, ~5 Hz
-constexpr float kDonkSnapDepth = 0.35f;  // DONK ring starts this many octaves above its target
-constexpr float kDonkRingMaxHz = 420.f;  // the ring drops to a lower harmonic rather than go above this
+constexpr float kDonkSnapDepth = 1.3f;  // DONK cutoff starts this many octaves above where it rings
+constexpr float kDonkSink = 0.3f;       // ... and closes this many octaves below it over EG TIME
+constexpr float kDonkSatIn = 0.9f;      // DONK in-filter saturation: input gain
+constexpr float kDonkSatOut = 1.1f;     // ... and output level
+constexpr float kDonkHold = 0.05f;      // share of EG TIME it rings before closing
 
 // ---------------------------------------------------------------------------
 // The engine
@@ -281,10 +286,9 @@ class Engine {
     dcx_ = dcy_ = osx_ = osy_ = z;
     hold_ = hacc_ = z;
     for (int j = 0; j < N; ++j) {
-      sw_[j] = ef_[j] = es_[j] = rgz_[j] = 0.f;
+      sw_[j] = ef_[j] = es_[j] = 0.f;
       started_[j] = false;  // no PLUCK decay until the first note start
     }
-    tr_ = z;
     penv_ = kenv_ = z;
     dec_ = att_ = splat<V>(1.f);
     first_ = true;
@@ -362,8 +366,6 @@ class Engine {
     started_[lane] = true;
     ef_[lane] = 1.f;  // DONK snap
     es_[lane] = 0.f;  // DONK ring position
-    rgz_[lane] = 0.f;             // ring fades in over the first block
-    lset(tr_, lane, 0.f);
     jump_[lane] = true;  // pitch jumps to the new note instead of ramping
   }
 
@@ -380,13 +382,13 @@ class Engine {
     V fa1, fa2, fa3, da1, da2, da3, fb1, fb2, fb3, db1, db2, db3, fgain, cAv, crR, crQ, crIq;
     fa1 = fa2 = fa3 = da1 = da2 = da3 = fb1 = fb2 = fb3 = db1 = db2 = db3 = splat<V>(0.f);
     fgain = splat<V>(1.f);
-    V rr0, rr1, rg0, rg1;  // DONK ring: frequency ratio and gain at block start / end
-    float fc0[N], fc1[N], kq[N];
+    float fc0[N], fc1[N], kq[N], kq0[N];
     const float egSamples = maxf(egTimeMs_ * 0.001f * kSR, 1.f);
     const float swRate = 1.f / egSamples;
     // DONK: ring length = EG TIME; the snap (6 ms + 4 % of EG TIME)
+    // DONK: filter snap (10 ms + 4 % of EG TIME), ring fades over EG TIME
     const float duRing = (float)len / egSamples;
-    const float fF = exp2f_fast(-1.44269504f * (float)len / (0.003f * kSR + 0.02f * egSamples));
+    const float fF = exp2f_fast(-1.44269504f * (float)len / (0.010f * kSR + 0.04f * egSamples));
     float hRatio2 = 1.f, hRatio1 = 1.f;
     if (mode_ == Params::kHoover) {
       const float cents = 4.f + 26.f * clampf(p_char_, 0.f, 1.f);
@@ -455,34 +457,29 @@ class Engine {
         fc0[j] = w0 * exp2f_fast(lo + (hi - lo) * u0);
         fc1[j] = w0 * exp2f_fast(lo + (hi - lo) * u1);
         lset(cAv, j, (u1 < 1.f || !started_[j]) ? 1.f : cA_);  // PLUCK starts once the sweep peaks
-        kq[j] = 1.f / (0.7f + 12.f * ch * ch);
+        kq[j] = kq0[j] = 1.f / (0.7f + 12.f * ch * ch);
       } else if (mode_ == Params::kDonk) {
-        // ring: TIMBRE picks the harmonic (2nd..8th, 5th at 700), the ring
-        // snaps down onto it, then dies away
-        // ring level (1 - u)^2, u rising 0 -> 1 over EG TIME: it holds up
-        // for the first part of the hit, then falls away (as measured)
-        const float f0e = ef_[j];
+        // resonant low-pass on a square, as measured on a donk loop: opens
+        // ~9x the note, snaps down onto the ring harmonic (5th at TIMBRE
+        // 700) within ~30 ms and rings there, then closes below it so the
+        // ring fades. The resonance only ever lands on harmonics of the
+        // note, so it reads as a "donk", not a whistle.
+        const float lt = 0.95f + 2.f * tm;  // log2 of the ring harmonic: ~2nd..8th
+        const float f0e = ef_[j], u0 = es_[j];
         const float f1e = f0e * fF;
-        ef_[j] = f1e;
-        float u1 = es_[j] + duRing;
+        float u1 = u0 + duRing;
         if (u1 > 1.f) u1 = 1.f;
+        ef_[j] = f1e;
         es_[j] = u1;
-        const float s1e = (1.f - u1) * (1.f - u1) * (1.f - u1);
-        float h = (float)(int32_t)(exp2f_fast(1.f + 2.f * tm) + 0.5f);
-        // keep the ring a "bonk", not a whistle: on higher notes it moves
-        // down to a lower harmonic (never below the 2nd)
-        const float hMaxHz = (float)(int32_t)(kDonkRingMaxHz * kInvSR / w0);
-        if (h > hMaxHz) h = hMaxHz;
-        if (h < 2.f) h = 2.f;
-        const float rmax = 0.42f / w;  // keep the ring under ~20 kHz
-        lset(rr0, j, minf(h * exp2f_fast(kDonkSnapDepth * f0e), rmax));
-        lset(rr1, j, minf(h * exp2f_fast(kDonkSnapDepth * f1e), rmax));
-        const float amt = 0.4f + 4.6f * ch * __builtin_sqrtf(ch);  // ring vs body: up to ~+14 dB
-        lset(rg0, j, rgz_[j]);
-        rgz_[j] = amt * s1e;
-        lset(rg1, j, rgz_[j]);
-        fc0[j] = fc1[j] = 3.f * w0;
-        kq[j] = 1.4142136f;
+        const float k0 = relu<float>(u0 - kDonkHold) * (1.f / (1.f - kDonkHold));
+        const float k1 = relu<float>(u1 - kDonkHold) * (1.f / (1.f - kDonkHold));
+        fc0[j] = w0 * exp2f_fast(lt + kDonkSnapDepth * f0e - kDonkSink * k0);
+        fc1[j] = w0 * exp2f_fast(lt + kDonkSnapDepth * f1e - kDonkSink * k1);
+        // the resonance itself dies away after the hold ((1 - k)^4 fade)
+        const float qp = 40.f * ch * ch;
+        const float r0 = (1.f - k0) * (1.f - k0), r1 = (1.f - k1) * (1.f - k1);
+        kq0[j] = 1.f / (0.7f + qp * r0 * r0);
+        kq[j] = 1.f / (0.7f + qp * r1 * r1);
         lset(cAv, j, started_[j] ? cA_ : 1.f);
       } else {
         lset(cAv, j, started_[j] ? cA_ : 1.f);
@@ -490,7 +487,7 @@ class Engine {
       if (mode_ == Params::kDread || mode_ == Params::kDonk) {
         // stage 1: resonant SVF, stage 2: Butterworth SVF at the same cutoff
         float b1, b2, b3, e1, e2, e3;
-        svfCoefs(fc0[j], kq[j], b1, b2, b3);
+        svfCoefs(fc0[j], kq0[j], b1, b2, b3);
         svfCoefs(fc1[j], kq[j], e1, e2, e3);
         lset(fa1, j, b1); lset(fa2, j, b2); lset(fa3, j, b3);
         lset(da1, j, (e1 - b1) * invLen); lset(da2, j, (e2 - b2) * invLen); lset(da3, j, (e3 - b3) * invLen);
@@ -499,6 +496,8 @@ class Engine {
         lset(fb1, j, b1); lset(fb2, j, b2); lset(fb3, j, b3);
         lset(db1, j, (e1 - b1) * invLen); lset(db2, j, (e2 - b2) * invLen); lset(db3, j, (e3 - b3) * invLen);
         // resonance takes some level out of the fundamental: put some back
+        // (DONK: none, its resonance changes over the note and the body
+        // has to stay put)
         lset(fgain, j, mode_ == Params::kDonk ? 1.f : 1.f + 0.35f * (1.f / kq[j] - 0.7f) * 0.1f);
         // DREAD crunch: hold rate 48 kHz -> ~10 kHz, 12 -> 6 bits with DRIVE
         lset(crR, j, exp2f_fast(-2.3f * dv));
@@ -551,49 +550,38 @@ class Engine {
     switch (mode_) {
       case Params::kDread:
       case Params::kDonk: {
-        // band-limited square (DREAD) / 45 % pulse (DONK: a few even
-        // harmonics, as in the reference)
+        // band-limited square
         V idt = idt_;
         const V iinc = (idtEnd - idt) * invLen;
-        const float pwm = (mode_ == Params::kDonk) ? 0.45f : 0.5f;
         for (int i = 0; i < len; ++i) {
           idt += iinc;
           const V t = T_[i];
-          C_[i] = 0.8f * (blepSaw(t, idt) - blepSaw(fracp(t + pwm), idt));
+          C_[i] = 0.8f * (blepSaw(t, idt) - blepSaw(fracp(t + 0.5f), idt));
         }
-        // DREAD: stage 1 = resonant TPT SVF low-pass (state soft-limited,
-        // so high Q squelches instead of blowing up), in series with stage 2.
-        // DONK: the ring (sine burst) into the scratch buffer; stage 2 then
-        // low-passes the raw pulse for the body.
-        const bool donk = (mode_ == Params::kDonk);
+        // stage 1: resonant TPT SVF low-pass. The state is soft-limited:
+        // DREAD squelches at +-10, DONK gets room for its much higher Q
         V s1 = s1_, s2 = s2_, c1 = fa1, c2 = fa2, c3 = fa3;
-        if (donk) {
-          V g = rg0, r = rr0, tr = tr_;
-          const V gi = (rg1 - rg0) * invLen;
-          const V ri = (rr1 - rr0) * invLen;
-          for (int i = 0; i < len; ++i) {
-            g += gi;
-            r += ri;
-            tr = fracp(tr + r * W_[i]);
-            T2_[i] = g * sin2pi(tr);
-          }
-          tr_ = tr;
-        } else {
-          for (int i = 0; i < len; ++i) {
-            c1 += da1;
-            c2 += da2;
-            c3 += da3;
-            const V v3 = C_[i] - s2;
-            const V v1 = c1 * s1 + c2 * v3;
-            const V v2 = s2 + c2 * s1 + c3 * v3;
-            s1 = 10.f * sat(0.1333333f * v1 - 0.0666667f * s1);  // unity slope, limits at +-10
-            s2 = 2.f * v2 - s2;
-            C_[i] = v2;
-          }
+        const float lim = (mode_ == Params::kDonk) ? 80.f : 10.f;
+        const float la = 1.3333333f / lim, lb = 0.6666667f / lim;
+        for (int i = 0; i < len; ++i) {
+          c1 += da1;
+          c2 += da2;
+          c3 += da3;
+          const V v3 = C_[i] - s2;
+          const V v1 = c1 * s1 + c2 * v3;
+          const V v2 = s2 + c2 * s1 + c3 * v3;
+          s1 = lim * sat(la * v1 - lb * s1);  // unity slope, limits at +-lim
+          s2 = 2.f * v2 - s2;
+          C_[i] = v2;
         }
+        // DONK: saturate between the stages (as in the reference): the ring
+        // and the body come out at about the same peak level, and stage 2
+        // rounds the clipped tail back into a dark square
+        if (mode_ == Params::kDonk)
+          for (int i = 0; i < len; ++i) C_[i] = kDonkSatOut * sat(kDonkSatIn * C_[i]);
         s1_ = s1;
         s2_ = s2;
-        // stage 2: Butterworth SVF (DREAD: same cutoff, 24 dB / oct in total)
+        // stage 2: Butterworth SVF at the same cutoff (24 dB / oct in total)
         V s3 = s3_, s4 = s4_;
         c1 = fb1;
         c2 = fb2;
@@ -611,8 +599,6 @@ class Engine {
         }
         s3_ = s3;
         s4_ = s4;
-        if (donk)
-          for (int i = 0; i < len; ++i) C_[i] += T2_[i];
         break;
       }
       case Params::kGrowl: {
@@ -790,14 +776,13 @@ class Engine {
   float mod_timbre_[N], mod_drive_[N], mod_char_[N], mod_sub_[N], mod_pitch_[N];
   float lfo_[N];
   float sw_[N];          // DREAD sweep position 0..1
-  float ef_[N], es_[N];  // DONK snap envelope / ring position 0..1
-  float rgz_[N];         // DONK ring gain at the end of the last block
+  float ef_[N], es_[N];  // DONK filter snap envelope / close position 0..1
   bool started_[N];      // a note start has been seen (PLUCK only decays after one)
   bool jump_[N] = {};
   bool first_;
 
   // per lane, audio state
-  V t_, t2_, ts_, tk_, tr_, mprev_, s1_, s2_, s3_, s4_, dcx_, dcy_, osx_, osy_, hold_, hacc_;
+  V t_, t2_, ts_, tk_, mprev_, s1_, s2_, s3_, s4_, dcx_, dcy_, osx_, osy_, hold_, hacc_;
   V penv_, kenv_, dec_, att_;
   // ramp start values (end of the previous block)
   V w_, idt_, tim_, idx_, wk_, pw_, drv_, sub_;
