@@ -23,8 +23,10 @@
  *    - a silent voice starts clean (phases at zero, filters cleared)
  *    - a voice still ringing keeps its phases (no click) and restarts its
  *      envelopes
- *    - a legato note (key still held, known from voice events only)
+ *    - a legato note (another key still held: from voice events, or from
+ *      unit_note_on / unit_note_off, which is what the microKORG 2 sends)
  *      restarts the envelopes only when RETRIG is on
+ *  On the microKORG 2 (v1.1.0 meter): T and N arrive, E does not.
  *  Until the first voice event arrives every voice renders, so nothing goes
  *  silent if the host never sends events.
  *
@@ -87,6 +89,11 @@ float s_lastNote[kMk2MaxVoices];
 uint8_t s_lastTrig = 0;
 uint8_t s_srcSeen = 0;
 int s_noteOnPend = -1;                  // note number from unit_note_on
+// Keys held, from unit_note_on / unit_note_off: the microKORG 2 sends these
+// (and trigger bits) but no voice events, so this is where legato comes from
+bool s_keyDown[128];
+int s_keysHeld = 0;
+bool s_legatoHint = false;              // a note-on arrived while another key was held
 
 // Queue a note start for voice v unless one fired very recently
 void requestStart(int v, bool fresh, bool legato, uint8_t src) {
@@ -154,6 +161,9 @@ __attribute__((used)) int8_t unit_init(const unit_runtime_desc_t *desc) {
   s_lastTrig = 0;
   s_srcSeen = 0;
   s_noteOnPend = -1;
+  s_keysHeld = 0;
+  s_legatoHint = false;
+  for (int k = 0; k < 128; ++k) s_keyDown[k] = false;
   for (int v = 0; v < kMk2MaxVoices; ++v) {
     s_active[v] = false;
     s_held[v] = false;
@@ -214,12 +224,14 @@ __attribute__((used)) void unit_render(const float *in, float *out, uint32_t fra
     s_noteOnPend = -1;
     for (int v = 0; v < kMk2MaxVoices; ++v) {
       if (s_pend[v]) {
-        s_group[v >> 2].noteOn(v & 3, s_pendFresh[v], s_pendLegato[v]);
+        // legato also when note-on says another key was still held
+        s_group[v >> 2].noteOn(v & 3, s_pendFresh[v], s_pendLegato[v] || s_legatoHint);
         s_pend[v] = false;
         s_sinceStart[v] = 0;
       }
       if (s_sinceStart[v] < kRetrigGuard) s_sinceStart[v] += frames;
     }
+    s_legatoHint = false;
   }
 
   for (int base = 0; base < n; base += 4) {
@@ -316,6 +328,23 @@ __attribute__((used)) void unit_set_tempo(uint32_t tempo) { (void)tempo; }
 __attribute__((used)) void unit_note_on(uint8_t note, uint8_t velocity) {
   (void)velocity;
   s_noteOnPend = note;
+  if (note < 128) {
+    if (s_keysHeld > 0 && !s_keyDown[note]) s_legatoHint = true;
+    if (!s_keyDown[note]) ++s_keysHeld;
+    s_keyDown[note] = true;
+  }
+}
+
+__attribute__((used)) void unit_note_off(uint8_t note) {
+  if (note < 128 && s_keyDown[note]) {
+    s_keyDown[note] = false;
+    if (s_keysHeld > 0) --s_keysHeld;
+  }
+}
+
+__attribute__((used)) void unit_all_note_off(void) {
+  for (int k = 0; k < 128; ++k) s_keyDown[k] = false;
+  s_keysHeld = 0;
 }
 
 // Note events per voice

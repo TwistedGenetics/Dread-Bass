@@ -19,7 +19,7 @@ Needs microKORG 2 firmware **2.0.0 or later** (the version that added logue SDK 
 
 Dread Bass then appears at the end of the oscillator list as **Dread**. It's polyphonic, but it's built for mono / legato bass patches.
 
-**`DreadMtr.mk2unit`** (optional, also in each Release) is the same oscillator with its CPU load and note detection shown next to MODE, e.g. `DONK 21%T`. The number is the CPU load (peak over the last half second; 100 % = out of time, crackles). The letters show which ways of detecting a note start the synth has used so far: **E** voice events, **T** trigger bits, **N** note-on, **P** the pitch-jump fallback, **-** none yet. If you see only **P** or **-**, please report it: envelopes then only restart when the pitch changes.
+**`DreadMtr.mk2unit`** (optional, also in each Release) is the same oscillator with its CPU load and note detection shown next to MODE, e.g. `DONK 21%T`. The number is the CPU load (peak over the last half second; 100 % = out of time, crackles). The letters show which ways of detecting a note start the synth has used so far: **E** voice events, **T** trigger bits, **N** note-on, **P** the pitch-jump fallback, **-** none yet. If you see only **P** or **-**, please report it: envelopes then only restart when the pitch changes. On a microKORG 2 it shows **TN**: trigger bits and note-on arrive, voice events don't. Legato (for Retrig off) comes from note-on / note-off.
 
 Each Release also has WAV renders of the starter settings below, made by the desktop tests.
 
